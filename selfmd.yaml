@@ -1,0 +1,42 @@
+project:
+    name: selfmd
+    type: backend
+    description: ""
+targets:
+    include:
+        - src/**
+        - pkg/**
+        - cmd/**
+        - internal/**
+        - lib/**
+        - app/**
+    exclude:
+        - vendor/**
+        - node_modules/**
+        - .git/**
+        - .doc-build/**
+        - '**/*.pb.go'
+        - '**/generated/**'
+        - dist/**
+        - build/**
+    entry_points:
+        - main.go
+        - cmd/root.go
+output:
+    dir: .doc-build
+    language: en-US
+    secondary_languages: ["zh-TW"]
+    clean_before_generate: false
+claude:
+    model: sonnet
+    max_concurrent: 3
+    timeout_seconds: 30000
+    max_retries: 2
+    allowed_tools:
+        - Read
+        - Glob
+        - Grep
+    extra_args: []
+git:
+    enabled: true
+    base_branch: develop
