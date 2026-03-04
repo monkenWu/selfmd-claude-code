@@ -1,300 +1,348 @@
-# 專案介紹與功能特色
+# Introduction
 
-`selfmd` 是一款 Go 語言撰寫的 CLI 工具，透過在本地端執行 Claude Code CLI 作為 AI 後端，自動掃描任意專案的原始碼目錄，並產生結構化的 Wiki 風格技術文件。
+SelfMD is a CLI tool that automatically generates structured, high-quality technical documentation for any codebase — powered by Claude Code CLI.
 
-## 概述
+## Overview
 
-`selfmd` 解決的核心問題是：技術文件往往因維護成本高而快速老化。透過將 Claude Code CLI 的程式碼理解能力與自動化管線結合，`selfmd` 能夠在不需要人工撰寫的情況下，持續為軟體專案產生高品質的 Markdown 技術文件。
+SelfMD analyzes a project's source code, builds a documentation catalog, and generates comprehensive Markdown documentation pages by leveraging Anthropic's Claude AI through the Claude Code CLI. It is designed for developers who want to produce professional-grade project wikis without manual authoring effort.
 
-### 主要定位
+### Key Concepts
 
-| 特性 | 說明 |
-|------|------|
-| **AI 後端** | 本地 Claude Code CLI（`claude` 指令），不透過遠端 API |
-| **文件格式** | Markdown，支援 Mermaid 圖表與程式碼來源標註 |
-| **預設語言** | 繁體中文（zh-TW），可透過設定切換任意語言 |
-| **輸出位置** | 專案根目錄下的 `.doc-build/` 資料夾 |
-| **適用對象** | 任意語言的軟體專案（Go、Rust、Python、Node.js 等） |
+- **Automated Documentation Generation**: SelfMD scans your project structure, sends structured prompts to Claude, and writes complete Markdown documentation pages organized into a navigable hierarchy.
+- **Four-Phase Pipeline**: The generation process follows a strict sequence — scan, catalog, content, and index — each building on the previous phase's output.
+- **Incremental Updates**: After the initial full generation, SelfMD uses git change detection to identify which documentation pages need updating, avoiding costly full regeneration.
+- **Multi-Language Support**: Documentation can be generated in a primary language and then translated to secondary languages, with built-in prompt templates for multiple locales.
+- **YAML-Driven Configuration**: A single `selfmd.yaml` file controls all aspects of generation — project targets, output settings, Claude model parameters, and git integration.
 
-### 核心概念
+### When to Use SelfMD
 
-- **Catalog（文件目錄）**：由 AI 分析專案結構後自動規劃的階層式文件大綱，定義每個頁面的路徑與標題
-- **Pipeline（管線）**：四個有序執行的階段，從掃描到輸出一氣呵成
-- **Runner（執行器）**：將 `claude` 子行程的呼叫封裝為可重試、可超時的非同步工作單元
-- **Incremental Update（增量更新）**：透過 git diff 偵測原始碼變更，只重新產生受影響的文件頁面
+SelfMD is ideal when you need to:
 
----
+- Bootstrap a complete documentation wiki for an existing codebase
+- Keep documentation in sync with evolving source code via incremental updates
+- Produce documentation in multiple languages from a single source of truth
+- Standardize documentation structure across projects using AI-generated catalogs
 
-## 架構
-
-下圖展示 `selfmd` 的主要模組與資料流向。
+## Architecture
 
 ```mermaid
 flowchart TD
-    User["使用者（selfmd CLI）"]
+    CLI["CLI (cobra)"]
+    Config["config.Config"]
+    Scanner["scanner.Scan"]
+    Generator["generator.Generator"]
+    CatalogPhase["Catalog Phase"]
+    ContentPhase["Content Phase"]
+    IndexPhase["Index Phase"]
+    TranslatePhase["Translate Phase"]
+    PromptEngine["prompt.Engine"]
+    ClaudeRunner["claude.Runner"]
+    OutputWriter["output.Writer"]
+    GitModule["git Module"]
+    CatalogManager["catalog.Catalog"]
 
-    subgraph cmd["cmd/（指令層）"]
-        CmdInit["init"]
-        CmdGen["generate"]
-        CmdUpdate["update"]
-        CmdTrans["translate"]
-    end
-
-    subgraph internal["internal/（核心模組）"]
-        Config["config\n載入 selfmd.yaml"]
-        Scanner["scanner\n掃描專案目錄"]
-        Catalog["catalog\n文件目錄管理"]
-        Prompt["prompt\n模板引擎"]
-        ClaudeRunner["claude\nRunner / Parser"]
-        Generator["generator\n四階段管線"]
-        Git["git\nGit Diff 整合"]
-        Output["output\nWriter / LinkFixer / Viewer"]
-    end
-
-    User --> cmd
-    CmdGen --> Generator
-    CmdUpdate --> Generator
-    CmdTrans --> Generator
-    CmdInit --> Config
-
-    Generator --> Config
-    Generator --> Scanner
-    Generator --> Catalog
-    Generator --> Prompt
-    Generator --> ClaudeRunner
-    Generator --> Git
-    Generator --> Output
-
-    ClaudeRunner -->|"subprocess: claude -p"| AI["Claude Code CLI"]
-    Output -->|"Markdown + HTML"| DocBuild[".doc-build/"]
+    CLI -->|"loads"| Config
+    CLI -->|"invokes"| Generator
+    Generator -->|"phase 1"| Scanner
+    Generator -->|"phase 2"| CatalogPhase
+    Generator -->|"phase 3"| ContentPhase
+    Generator -->|"phase 4"| IndexPhase
+    Generator -->|"optional"| TranslatePhase
+    CatalogPhase --> PromptEngine
+    ContentPhase --> PromptEngine
+    IndexPhase --> OutputWriter
+    TranslatePhase --> PromptEngine
+    PromptEngine --> ClaudeRunner
+    ClaudeRunner -->|"subprocess: claude CLI"| Claude["Claude Code CLI"]
+    CatalogPhase --> CatalogManager
+    ContentPhase --> OutputWriter
+    Generator -->|"incremental update"| GitModule
 ```
 
----
+SelfMD is structured as a Go CLI application built with [Cobra](https://github.com/spf13/cobra). The entry point delegates to the `cmd` package, which defines four subcommands: `init`, `generate`, `update`, and `translate`. The core generation logic lives in the `internal/generator` package, which orchestrates scanner, prompt engine, Claude runner, catalog manager, and output writer modules.
 
-## 功能特色
+## Core Commands
 
-### 1. 四階段自動化文件產生管線
+SelfMD provides four CLI commands, each corresponding to a distinct workflow:
 
-執行 `selfmd generate` 時，管線依序完成以下四個階段：
+| Command | Description |
+|---------|-------------|
+| `selfmd init` | Scans the current directory, detects project type, and generates a `selfmd.yaml` configuration file |
+| `selfmd generate` | Runs the full four-phase documentation generation pipeline |
+| `selfmd update` | Performs incremental documentation updates based on git changes |
+| `selfmd translate` | Translates primary-language documentation into configured secondary languages |
 
-```go
-// Phase 1: Scan
-fmt.Println("[1/4] 掃描專案結構...")
-scan, err := scanner.Scan(g.Config, g.RootDir)
-
-// Phase 2: Generate Catalog
-fmt.Println("[2/4] 產生文件目錄...")
-cat, err = g.GenerateCatalog(ctx, scan)
-
-// Phase 3: Generate Content（並行）
-fmt.Printf("[3/4] 產生內容頁面（並行度：%d）...\n", concurrency)
-if err := g.GenerateContent(ctx, scan, cat, concurrency, !clean); err != nil { ... }
-
-// Phase 4: Generate Index & Navigation
-fmt.Println("[4/4] 產生導航與索引...")
-if err := g.GenerateIndex(ctx, cat); err != nil { ... }
-```
-
-> 來源：`internal/generator/pipeline.go#L86-L143`
-
-四個階段完成後，系統會自動產生可直接瀏覽的靜態 HTML 文件站台（`index.html`），並在 Git 倉庫中記錄本次 commit，供下次增量更新使用。
-
----
-
-### 2. Claude Code CLI 整合
-
-`selfmd` 不直接呼叫 Anthropic API，而是透過本地安裝的 `claude` CLI 子行程執行所有 AI 任務。每次呼叫會：
-
-- 透過 `stdin` 傳入渲染後的 Prompt
-- 以 `--output-format json` 取得結構化回應
-- 預設允許 `Read`、`Glob`、`Grep` 工具讓 Claude 讀取原始碼
-- 自動封鎖 `Write`、`Edit` 工具，防止 AI 意外修改原始碼
+### Command Hierarchy
 
 ```go
-args := []string{
-    "-p",
-    "--output-format", "json",
-}
-// ...
-args = append(args, "--disallowedTools", "Write", "--disallowedTools", "Edit")
-cmd := exec.CommandContext(ctx, "claude", args...)
-cmd.Stdin = strings.NewReader(opts.Prompt)
-```
-
-> 來源：`internal/claude/runner.go#L32-L76`
-
----
-
-### 3. 自動偵測專案類型
-
-`selfmd init` 會掃描當前目錄，依據設定檔（`go.mod`、`package.json`、`Cargo.toml` 等）自動判斷專案類型並產生 `selfmd.yaml`：
-
-| 偵測檔案 | 專案類型 |
-|---------|---------|
-| `go.mod` | `backend` |
-| `package.json` | `frontend`（若同時有 `go.mod` 則為 `fullstack`） |
-| `Cargo.toml` | `backend` |
-| `requirements.txt` / `pyproject.toml` | `backend` |
-| `pom.xml` / `build.gradle` | `backend` |
-| `Gemfile` | `backend` |
-| 無符合 | `library` |
-
-> 來源：`cmd/init.go#L60-L98`
-
----
-
-### 4. Git 整合與增量更新
-
-當原始碼發生變更時，無需重新產生全部文件。`selfmd update` 會：
-
-1. 讀取上次 `generate` 時記錄的 commit hash（儲存於 `.doc-build/_last_commit`）
-2. 呼叫 `git diff --name-status` 取得變更檔案清單
-3. 套用 include/exclude 過濾規則，篩選出目標檔案
-4. 僅重新產生受影響的文件頁面
-
-```go
-changedFiles, err := git.GetChangedFiles(rootDir, previousCommit, currentCommit)
-changedFiles = git.FilterChangedFiles(changedFiles, cfg.Targets.Include, cfg.Targets.Exclude)
-```
-
-> 來源：`cmd/update.go#L89-L94`
-
----
-
-### 5. 多語言文件支援
-
-`selfmd` 原生支援多語言文件。透過 `selfmd.yaml` 設定 `secondary_languages` 後，執行 `selfmd translate` 即可將主要語言的文件翻譯為其他語言。翻譯結果存放於 `.doc-build/{語言代碼}/` 子目錄。
-
-目前內建 Prompt 模板語言支援 `zh-TW` 與 `en-US`；文件輸出則支援 11 種語言：
-
-```go
-var KnownLanguages = map[string]string{
-    "zh-TW": "繁體中文",
-    "zh-CN": "简体中文",
-    "en-US": "English",
-    "ja-JP": "日本語",
-    "ko-KR": "한국어",
-    "fr-FR": "Français",
-    "de-DE": "Deutsch",
-    "es-ES": "Español",
-    "pt-BR": "Português",
-    "th-TH": "ไทย",
-    "vi-VN": "Tiếng Việt",
+var rootCmd = &cobra.Command{
+	Use:   "selfmd",
+	Short: "selfmd — Auto Documentation Generator for Claude Code CLI",
+	Long: banner + `Automatically generate structured, high-quality technical documentation
+for any codebase — powered by Claude Code CLI.`,
 }
 ```
 
-> 來源：`internal/config/config.go#L39-L51`
+> Source: cmd/root.go#L25-L30
 
----
+## Core Processes
 
-### 6. 並行頁面產生
+### Full Generation Pipeline
 
-為縮短大型專案的文件產生時間，`selfmd` 支援並行呼叫 Claude，預設並行度為 3，可透過設定檔或 `--concurrency` 旗標調整：
-
-```go
-Claude: ClaudeConfig{
-    Model:         "sonnet",
-    MaxConcurrent: 3,
-    TimeoutSeconds: 300,
-    MaxRetries:    2,
-    AllowedTools:  []string{"Read", "Glob", "Grep"},
-},
-```
-
-> 來源：`internal/config/config.go#L116-L123`
-
----
-
-### 7. 靜態 HTML 文件瀏覽器
-
-文件產生完成後，`selfmd` 會在 `.doc-build/index.html` 產生一個可直接在瀏覽器開啟的靜態文件站台，無需架設任何伺服器。瀏覽器包含語言切換功能，支援多語言文件導航。
-
----
-
-## 核心工作流程
+The `generate` command executes a four-phase pipeline:
 
 ```mermaid
 sequenceDiagram
-    participant User as 使用者
-    participant CLI as selfmd CLI
-    participant Scanner as scanner
-    participant Claude as Claude Code CLI
-    participant FS as .doc-build/
+    participant User
+    participant CLI as cmd/generate.go
+    participant Gen as Generator
+    participant Scanner as scanner.Scan
+    participant Claude as claude.Runner
+    participant Writer as output.Writer
 
     User->>CLI: selfmd generate
-    CLI->>Scanner: 掃描專案目錄與入口檔案
-    Scanner-->>CLI: ScanResult（檔案樹、README）
+    CLI->>Gen: NewGenerator(cfg, rootDir, logger)
+    Gen->>Writer: Clean() or EnsureDir()
 
-    CLI->>Claude: 渲染 catalog.tmpl → 呼叫 claude -p
-    Claude-->>CLI: 文件目錄 JSON（Catalog）
+    Note over Gen: Phase 1 — Scan
+    Gen->>Scanner: Scan(config, rootDir)
+    Scanner-->>Gen: ScanResult (file tree, README, entry points)
 
-    loop 每個目錄頁面（並行）
-        CLI->>Claude: 渲染 content.tmpl → 呼叫 claude -p
-        Claude-->>CLI: Markdown 頁面內容
-        CLI->>FS: 寫入 {dirPath}/index.md
-    end
+    Note over Gen: Phase 2 — Catalog
+    Gen->>Claude: GenerateCatalog(ctx, scan)
+    Claude-->>Gen: Catalog JSON
+    Gen->>Writer: WriteCatalogJSON(catalog)
 
-    CLI->>Claude: 渲染導航與索引
-    Claude-->>CLI: index.md 內容
-    CLI->>FS: 產生靜態 HTML 瀏覽器
-    CLI->>FS: 儲存 _last_commit
-    CLI-->>User: 完成報告（頁面數、耗時、費用）
+    Note over Gen: Phase 3 — Content
+    Gen->>Claude: GenerateContent(ctx, scan, catalog, concurrency)
+    Claude-->>Gen: Markdown pages (concurrent)
+    Gen->>Writer: WritePage(item, content)
+
+    Note over Gen: Phase 4 — Index
+    Gen->>Writer: GenerateIndex(ctx, catalog)
+    Gen->>Writer: WriteViewer(projectName, docMeta)
 ```
 
----
+The pipeline is implemented in the `Generate` method:
 
-## CLI 指令總覽
+```go
+func (g *Generator) Generate(ctx context.Context, opts GenerateOptions) error {
+	start := time.Now()
 
-| 指令 | 說明 |
-|------|------|
-| `selfmd init` | 偵測專案類型，產生 `selfmd.yaml` 設定檔 |
-| `selfmd generate` | 執行完整四階段文件產生管線 |
-| `selfmd generate --dry-run` | 僅顯示掃描結果，不實際呼叫 Claude |
-| `selfmd generate --clean` | 清除輸出目錄後重新產生 |
-| `selfmd update` | 基於 git diff 增量更新受影響的文件頁面 |
-| `selfmd translate` | 將主要語言文件翻譯為次要語言 |
+	// Phase 0: Setup
+	clean := opts.Clean || g.Config.Output.CleanBeforeGenerate
+	if clean {
+		fmt.Println("[0/4] Cleaning output directory...")
+		if !opts.DryRun {
+			if err := g.Writer.Clean(); err != nil {
+				return err
+			}
+		}
+	} else {
+		if err := g.Writer.EnsureDir(); err != nil {
+			return err
+		}
+	}
 
-所有指令共用的全域旗標：
+	// Phase 1: Scan
+	fmt.Println("[1/4] Scanning project structure...")
+	scan, err := scanner.Scan(g.Config, g.RootDir)
+	if err != nil {
+		return fmt.Errorf("failed to scan project: %w", err)
+	}
+```
 
-| 旗標 | 說明 |
-|------|------|
-| `-c, --config` | 設定檔路徑（預設：`selfmd.yaml`） |
-| `-v, --verbose` | 顯示詳細 Debug 輸出 |
-| `-q, --quiet` | 僅顯示錯誤訊息 |
+> Source: internal/generator/pipeline.go#L68-L91
 
-> 來源：`cmd/root.go#L30-L33`
+### Incremental Update Flow
 
----
+The `update` command uses git diff to detect changed source files, matches them against existing documentation pages, and regenerates only the affected pages:
 
-## 相關連結
+1. **Parse changed files** — Reads the git diff between the previously recorded commit and HEAD
+2. **Match to existing docs** — Searches documentation page content for references to changed file paths
+3. **Determine updates** — Asks Claude which matched pages actually need regeneration
+4. **Handle unmatched files** — Asks Claude if new documentation pages should be created for files not referenced in any existing page
+5. **Regenerate** — Re-runs content generation for the identified pages
 
-- [技術棧與相依套件](../tech-stack/index.md) — 了解 `selfmd` 使用的程式語言、框架與外部套件
-- [輸出結構說明](../output-structure/index.md) — `.doc-build/` 目錄的完整結構
-- [安裝與建置](../../getting-started/installation/index.md) — 如何在本機安裝並執行 `selfmd`
-- [初始化設定](../../getting-started/init/index.md) — `selfmd init` 的詳細使用說明
-- [selfmd generate](../../cli/cmd-generate/index.md) — generate 指令完整參數說明
-- [selfmd update](../../cli/cmd-update/index.md) — update 指令完整參數說明
-- [selfmd translate](../../cli/cmd-translate/index.md) — translate 指令完整參數說明
-- [整體流程與四階段管線](../../architecture/pipeline/index.md) — 深入了解管線架構設計
-- [Claude CLI 執行器](../../core-modules/claude-runner/index.md) — Runner 模組的實作細節
-- [多語言支援](../../i18n/index.md) — 多語言文件的設定與翻譯工作流程
-- [Git 整合與增量更新](../../git-integration/index.md) — 增量更新的運作原理
+```go
+func (g *Generator) Update(ctx context.Context, scan *scanner.ScanResult, previousCommit, currentCommit, changedFiles string) error {
+	// Read existing catalog
+	existingCatalogJSON, err := g.Writer.ReadCatalogJSON()
+	if err != nil {
+		return fmt.Errorf("failed to read existing catalog (please run selfmd generate first): %w", err)
+	}
+```
 
----
+> Source: internal/generator/updater.go#L32-L37
 
-## 參考檔案
+## Configuration
 
-| 檔案路徑 | 說明 |
-|----------|------|
-| `cmd/root.go` | CLI 根指令定義、全域旗標設定 |
-| `cmd/generate.go` | `generate` 指令實作，管線入口 |
-| `cmd/init.go` | `init` 指令實作，專案類型偵測邏輯 |
-| `cmd/update.go` | `update` 指令實作，增量更新流程 |
-| `cmd/translate.go` | `translate` 指令實作，多語言翻譯流程 |
-| `internal/config/config.go` | `Config` 結構定義、預設值、已知語言清單 |
-| `internal/generator/pipeline.go` | `Generator` 結構、四階段管線實作 |
-| `internal/scanner/scanner.go` | 專案目錄掃描器實作 |
-| `internal/claude/runner.go` | Claude CLI 子行程執行封裝 |
-| `internal/prompt/engine.go` | Prompt 模板引擎、各類型 PromptData 定義 |
-| `internal/output/writer.go` | 輸出目錄寫入、Catalog JSON 管理 |
-| `internal/git/git.go` | Git diff 整合、變更檔案過濾 |
+SelfMD is configured through a `selfmd.yaml` file that defines five configuration sections:
+
+```yaml
+project:
+    name: selfmd
+    type: cli
+    description: ""
+targets:
+    include:
+        - src/**
+        - pkg/**
+        - cmd/**
+        - internal/**
+    exclude:
+        - vendor/**
+        - node_modules/**
+        - .git/**
+    entry_points:
+        - main.go
+        - cmd/root.go
+output:
+    dir: docs
+    language: en-US
+    secondary_languages: ["zh-TW"]
+    clean_before_generate: false
+claude:
+    model: opus
+    max_concurrent: 3
+    timeout_seconds: 30000
+    max_retries: 2
+    allowed_tools:
+        - Read
+        - Glob
+        - Grep
+git:
+    enabled: true
+    base_branch: develop
+```
+
+> Source: selfmd.yaml#L1-L33
+
+The configuration is loaded and validated by the `config.Config` struct:
+
+```go
+type Config struct {
+	Project ProjectConfig `yaml:"project"`
+	Targets TargetsConfig `yaml:"targets"`
+	Output  OutputConfig  `yaml:"output"`
+	Claude  ClaudeConfig  `yaml:"claude"`
+	Git     GitConfig     `yaml:"git"`
+}
+```
+
+> Source: internal/config/config.go#L11-L17
+
+## Key Design Decisions
+
+- **Claude Code CLI as the AI backend**: Rather than calling the Anthropic API directly, SelfMD invokes the `claude` CLI as a subprocess. This leverages Claude Code's built-in tool permissions (Read, Glob, Grep) so the AI can actively explore the codebase while generating documentation.
+- **Concurrent content generation**: Content pages are generated in parallel (controlled by `max_concurrent`) to reduce wall-clock time for large projects.
+- **Catalog-first approach**: The catalog is generated first as a structured JSON tree, then each content page is generated independently. This ensures a coherent documentation hierarchy before any page content is written.
+- **Git-based incremental updates**: By recording the commit hash after each generation, subsequent `update` runs only need to process files changed since the last run, significantly reducing cost and time.
+
+## Usage Examples
+
+### Initializing a Project
+
+The `init` command auto-detects project type and entry points:
+
+```go
+func runInit(cmd *cobra.Command, args []string) error {
+	if _, err := os.Stat(cfgFile); err == nil && !forceInit {
+		return fmt.Errorf("config file %s already exists, use --force to overwrite", cfgFile)
+	}
+
+	cfg := config.DefaultConfig()
+
+	projectType, entryPoints := detectProject()
+	cfg.Project.Type = projectType
+	cfg.Project.Name = filepath.Base(mustCwd())
+	cfg.Targets.EntryPoints = entryPoints
+
+	if err := cfg.Save(cfgFile); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+```
+
+> Source: cmd/init.go#L27-L41
+
+### Running a Full Generation
+
+```go
+opts := generator.GenerateOptions{
+	Clean:       clean,
+	DryRun:      dryRun,
+	Concurrency: concurrencyNum,
+}
+
+return gen.Generate(ctx, opts)
+```
+
+> Source: cmd/generate.go#L89-L95
+
+### Claude CLI Invocation
+
+The `claude.Runner` executes the Claude Code CLI with structured arguments, including model selection, tool permissions, and JSON output format:
+
+```go
+func (r *Runner) Run(ctx context.Context, opts RunOptions) (*RunResult, error) {
+	args := []string{
+		"-p",
+		"--output-format", "json",
+	}
+
+	model := opts.Model
+	if model == "" {
+		model = r.config.Model
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+
+	tools := opts.AllowedTools
+	if len(tools) == 0 {
+		tools = r.config.AllowedTools
+	}
+	if len(tools) > 0 {
+		for _, t := range tools {
+			args = append(args, "--allowedTools", t)
+		}
+	}
+
+	// Explicitly block Write/Edit to prevent content from being lost in denied tool calls
+	args = append(args, "--disallowedTools", "Write", "--disallowedTools", "Edit")
+```
+
+> Source: internal/claude/runner.go#L30-L56
+
+## Related Links
+
+- [Output Structure](../output-structure/index.md)
+- [Tech Stack](../tech-stack/index.md)
+- [Installation](../../getting-started/installation/index.md)
+- [First Run](../../getting-started/first-run/index.md)
+- [Configuration Overview](../../configuration/config-overview/index.md)
+- [Generation Pipeline](../../architecture/pipeline/index.md)
+- [Module Dependencies](../../architecture/module-dependencies/index.md)
+
+## Reference Files
+
+| File Path | Description |
+|-----------|-------------|
+| `main.go` | Application entry point |
+| `go.mod` | Go module definition and dependencies |
+| `selfmd.yaml` | Project configuration file |
+| `cmd/root.go` | Root CLI command definition with global flags |
+| `cmd/generate.go` | `generate` command implementation |
+| `cmd/init.go` | `init` command with project type detection |
+| `cmd/update.go` | `update` command for incremental documentation updates |
+| `cmd/translate.go` | `translate` command for multi-language support |
+| `internal/config/config.go` | Configuration struct definitions, loading, and validation |
+| `internal/generator/pipeline.go` | Generator struct and four-phase pipeline orchestration |
+| `internal/generator/updater.go` | Incremental update logic with file-to-doc matching |
+| `internal/scanner/scanner.go` | Project directory scanning and file filtering |
+| `internal/scanner/filetree.go` | File tree data structure and rendering |
+| `internal/claude/runner.go` | Claude Code CLI subprocess invocation with retry logic |
+| `internal/prompt/engine.go` | Prompt template engine with multi-language support |
+| `internal/output/writer.go` | Output file writing, catalog persistence, and page management |
+| `internal/catalog/catalog.go` | Catalog data model, parsing, flattening, and serialization |
+| `internal/git/git.go` | Git operations for change detection and commit tracking |

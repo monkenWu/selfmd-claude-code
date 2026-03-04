@@ -1,89 +1,88 @@
-# selfmd update
+# update Command
 
-`selfmd update` 指令分析 git 變更歷史，以增量方式更新受影響的文件頁面，無需重新產生所有文件。
+The `selfmd update` command performs incremental documentation updates by analyzing git changes and regenerating only the affected documentation pages.
 
-## 概述
+## Overview
 
-`selfmd update` 是 selfmd 的增量更新模式。與每次全量重新產生的 `selfmd generate` 不同，`update` 指令透過比對 git commit 之間的差異，只重新產生受變更影響的文件頁面，大幅節省時間與 API 費用。
+The `update` command is designed for maintaining documentation after the initial full generation. Instead of regenerating all pages from scratch, it:
 
-**使用前提：**
-- 必須已執行過 `selfmd generate`，`.doc-build/` 目錄中存在初始文件
-- 專案必須是 git 儲存庫
-- Claude CLI 必須可用
+- Detects source code changes between two git commits
+- Matches changed files to existing documentation pages
+- Uses Claude to determine which pages actually need updating
+- Identifies whether new documentation pages should be created for unmatched files
+- Regenerates only the affected pages, preserving unchanged content
 
-**核心概念：**
-- **比較範圍（Comparison Range）**：兩個 commit 之間的差異，即 `previousCommit..currentCommit`
-- **匹配（Matching）**：已變更的原始碼檔案路徑是否出現在現有文件頁面內容中
-- **葉節點升級（Leaf Promotion）**：當新增頁面需要成為現有頁面的子頁面時，舊的葉節點會自動升級為父節點
+This command requires that documentation has been previously generated using `selfmd generate`. It relies on the existing catalog (`_catalog.json`) and a saved commit reference (`_last_commit`) to determine what has changed since the last generation or update.
 
-## 架構
+### Prerequisites
+
+- The current directory must be a git repository
+- Claude CLI must be available on the system
+- A valid `selfmd.yaml` configuration file must exist
+- Documentation must have been previously generated via `selfmd generate`
+
+## Architecture
 
 ```mermaid
 flowchart TD
-    CLI["cmd/update.go\nCLI 入口點"]
-    GitCheck["git.IsGitRepo\n驗證 git 環境"]
-    CommitResolution["Commit 解析\n--since / _last_commit / merge-base"]
-    GitDiff["git.GetChangedFiles\n取得變更檔案清單"]
-    Filter["git.FilterChangedFiles\n套用 include/exclude 過濾"]
-    Scanner["scanner.Scan\n掃描專案結構"]
-    Update["generator.Update\n增量更新主流程"]
-
-    ReadCatalog["Writer.ReadCatalogJSON\n讀取 _catalog.json"]
-    Match["matchChangedFilesToDocs\n比對變更檔案與文件頁面"]
-    ClaudeMatched["determineMatchedUpdates\nClaude 決定哪些頁面需要更新"]
-    ClaudeUnmatched["determineUnmatchedPages\nClaude 決定是否新增頁面"]
-    Regenerate["generateSinglePage\n重新產生頁面內容"]
-    GenerateIndex["GenerateIndex\n重新產生導覽與索引"]
-    SaveCommit["Writer.SaveLastCommit\n儲存 _last_commit"]
-
-    CLI --> GitCheck
-    CLI --> CommitResolution
-    CommitResolution --> GitDiff
-    GitDiff --> Filter
-    Filter --> Scanner
-    Scanner --> Update
-
-    Update --> ReadCatalog
-    ReadCatalog --> Match
-    Match --> ClaudeMatched
-    Match --> ClaudeUnmatched
-    ClaudeMatched --> Regenerate
-    ClaudeUnmatched --> Regenerate
-    Regenerate --> GenerateIndex
-    GenerateIndex --> SaveCommit
+    A["selfmd update"] --> B["Load Config"]
+    B --> C["Determine Comparison Commit"]
+    C --> C1{"--since flag?"}
+    C1 -- "Yes" --> C2["Use specified commit"]
+    C1 -- "No" --> C3{"_last_commit exists?"}
+    C3 -- "Yes" --> C4["Use saved commit"]
+    C3 -- "No" --> C5["Fallback: git merge-base"]
+    C2 --> D["git.GetChangedFiles"]
+    C4 --> D
+    C5 --> D
+    D --> E["git.FilterChangedFiles"]
+    E --> F["scanner.Scan"]
+    F --> G["Generator.Update"]
+    G --> H["matchChangedFilesToDocs"]
+    H --> I["determineMatchedUpdates"]
+    H --> J["determineUnmatchedPages"]
+    I --> K["generateSinglePage"]
+    J --> K
+    K --> L["SaveLastCommit"]
 ```
 
-## 指令語法
+## Command Syntax
 
-```bash
+```
 selfmd update [flags]
 ```
 
-**可用旗標：**
+### Flags
 
-| 旗標 | 類型 | 說明 |
-|------|------|------|
-| `--since <commit>` | string | 指定比較基準 commit（預設自動偵測） |
-| `--config <path>` | string | 指定設定檔路徑（全域旗標，繼承自 root） |
-| `--verbose` | bool | 顯示詳細的除錯日誌（全域旗標，繼承自 root） |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--since` | `string` | `""` | Compare with a specified commit hash. If omitted, defaults to the last generate/update commit |
+| `-c, --config` | `string` | `selfmd.yaml` | Path to the configuration file (inherited from root) |
+| `-v, --verbose` | `bool` | `false` | Enable verbose debug output (inherited from root) |
 
-> 來源：`cmd/update.go#L19-L31`
+### Examples
 
-## Commit 解析邏輯
+```bash
+# Basic incremental update (uses last saved commit)
+selfmd update
 
-`selfmd update` 在執行前需要確定「從哪個 commit 開始比較」。系統依照以下優先順序解析基準 commit：
+# Update since a specific commit
+selfmd update --since abc1234
 
-```mermaid
-flowchart TD
-    A{有無 --since 旗標?} -- 有 --> B["使用 --since 指定的 commit"]
-    A -- 無 --> C{讀取 _last_commit 是否成功?}
-    C -- 成功 --> D["使用 _last_commit 中儲存的 commit"]
-    C -- 失敗 --> E{git merge-base 是否成功?}
-    E -- 成功 --> F["使用 merge-base\n（當前分支與 baseBranch 的分叉點）"]
-    E -- 失敗 --> G["回傳錯誤\n提示先執行 selfmd generate\n或使用 --since 指定 commit"]
+# Update with verbose logging
+selfmd update -v
+
+# Update with a custom config file
+selfmd update -c my-config.yaml
 ```
 
-`_last_commit` 檔案由每次 `generate` 或 `update` 完成後自動寫入，存放於 `.doc-build/_last_commit`。
+## Core Processes
+
+The update command follows a multi-step pipeline that progressively narrows down which pages need regeneration.
+
+### Step 1: Commit Resolution
+
+The command first determines which two commits to compare. The resolution follows a three-level fallback:
 
 ```go
 // Determine comparison commit
@@ -97,67 +96,179 @@ if previousCommit == "" {
         // Fallback to merge-base
         base, err := git.GetMergeBase(rootDir, cfg.Git.BaseBranch)
         if err != nil {
-            return fmt.Errorf("無法取得基準 commit: %w\n提示：先執行 selfmd generate 或使用 --since 指定 commit", err)
+            return fmt.Errorf("cannot get base commit: %w\nhint: run selfmd generate first or use --since to specify a commit", err)
         }
         previousCommit = base
     }
 }
 ```
 
-> 來源：`cmd/update.go#L68-L82`
+> Source: cmd/update.go#L68-L82
 
-## 四階段更新流程
+### Step 2: Change Detection and Filtering
 
-`generator.Update()` 方法依序執行以下四個階段：
-
-### [1/4] 搜尋受影響的文件頁面
-
-`matchChangedFilesToDocs` 對每個已變更的原始碼檔案，掃描所有現有文件頁面的內容，尋找包含該檔案路徑的頁面。
+Changed files between the two commits are retrieved using `git diff --name-status` and filtered through the configured include/exclude glob patterns:
 
 ```go
-// For each changed file, find which pages reference it
-for _, f := range files {
-    var matchedPages []catalog.FlatItem
+changedFiles, err := git.GetChangedFiles(rootDir, previousCommit, currentCommit)
+if err != nil {
+    return err
+}
+
+changedFiles = git.FilterChangedFiles(changedFiles, cfg.Targets.Include, cfg.Targets.Exclude)
+```
+
+> Source: cmd/update.go#L89-L94
+
+### Step 3: File-to-Page Matching
+
+The `matchChangedFilesToDocs` method searches existing documentation pages for references to changed file paths. It pre-reads all page contents, then checks each changed file against every page to find text matches:
+
+```go
+func (g *Generator) matchChangedFilesToDocs(files []git.ChangedFile, cat *catalog.Catalog) (matched []matchResult, unmatched []string) {
+    items := cat.Flatten()
+
+    // Pre-read all page contents
+    pageContents := make(map[string]string)
     for _, item := range items {
-        content, ok := pageContents[item.Path]
-        if !ok {
+        content, err := g.Writer.ReadPage(item)
+        if err != nil {
             continue
         }
-        if strings.Contains(content, f.Path) {
-            matchedPages = append(matchedPages, item)
+        pageContents[item.Path] = content
+    }
+
+    // For each changed file, find which pages reference it
+    for _, f := range files {
+        var matchedPages []catalog.FlatItem
+        for _, item := range items {
+            content, ok := pageContents[item.Path]
+            if !ok {
+                continue
+            }
+            if strings.Contains(content, f.Path) {
+                matchedPages = append(matchedPages, item)
+            }
+        }
+
+        if len(matchedPages) > 0 {
+            matched = append(matched, matchResult{
+                changedFile: f.Path,
+                pages:       matchedPages,
+            })
+        } else {
+            unmatched = append(unmatched, f.Path)
         }
     }
-    // ...
+
+    return matched, unmatched
 }
 ```
 
-> 來源：`internal/generator/updater.go#L191-L211`
+> Source: internal/generator/updater.go#L177-L214
 
-此步驟將變更檔案分為兩類：
-- **matched**（已匹配）：在現有文件中找到引用的檔案
-- **unmatched**（未匹配）：沒有任何現有文件引用的新檔案
+### Step 4: Claude-Assisted Update Analysis
 
-### [2/4] Claude 判斷需更新的現有頁面
+The update process makes up to two Claude API calls to intelligently determine what needs updating:
 
-針對已匹配的檔案，呼叫 Claude CLI 評估每個相關文件頁面是否確實受到影響，並返回需要重新產生的頁面清單。
+```mermaid
+sequenceDiagram
+    participant U as Generator.Update
+    participant M as determineMatchedUpdates
+    participant N as determineUnmatchedPages
+    participant C as Claude Runner
+    participant W as Output Writer
 
-Claude 的判斷結果以 JSON 格式返回，包含 `catalogPath`、`title`、`reason` 三個欄位：
+    U->>U: matchChangedFilesToDocs
+    
+    alt Matched files exist
+        U->>M: Pass matched files + affected pages
+        M->>C: RenderUpdateMatched prompt
+        C-->>M: JSON list of pages needing regeneration
+    end
+
+    alt Unmatched files exist
+        U->>N: Pass unmatched file paths + catalog
+        N->>C: RenderUpdateUnmatched prompt
+        C-->>N: JSON list of new pages to create
+        N->>U: Add new items to catalog
+    end
+
+    loop For each page to regenerate
+        U->>C: generateSinglePage
+        C-->>W: Write updated content
+    end
+
+    U->>W: SaveLastCommit
+```
+
+**Matched file analysis** (`determineMatchedUpdates`): Sends changed file paths along with summaries of potentially affected documentation pages to Claude, which returns a JSON array of pages that genuinely need regeneration. The prompt instructs Claude to be conservative — only marking pages for regeneration when changes actually affect behavior, architecture, or APIs.
+
+**Unmatched file analysis** (`determineUnmatchedPages`): For source files not referenced by any existing documentation page, Claude determines whether new pages should be created. It avoids duplication by checking whether the file logically belongs within the scope of an existing page.
+
+### Step 5: Page Regeneration
+
+Pages identified for update are regenerated using the same `generateSinglePage` method used by the `generate` command. Existing page content is passed as context to help Claude produce a relevant update:
 
 ```go
+for i, item := range allPages {
+    fmt.Printf("      [%d/%d] %s（%s）...", i+1, len(allPages), item.Title, item.Path)
+    // Read existing content to pass as context for regeneration
+    existing, _ := g.Writer.ReadPage(item)
+    err := g.generateSinglePage(ctx, scan, item, catalogTable, linkFixer, existing)
+    if err != nil {
+        fmt.Printf(" Failed: %v\n", err)
+        g.Logger.Warn("page regeneration failed", "title", item.Title, "path", item.Path, "error", err)
+        g.writePlaceholder(item, err)
+    }
+}
+```
+
+> Source: internal/generator/updater.go#L137-L148
+
+### Step 6: Catalog and Navigation Updates
+
+When new pages are added, the catalog structure is updated dynamically. The system handles a special case where adding a child page to an existing leaf node promotes that leaf to a parent node, moving its original content to an "overview" child:
+
+```go
+promoted := addItemToCatalog(cat, np.CatalogPath, np.Title)
+if promoted != nil {
+    // A leaf node was promoted to a parent.
+    // Move the original content to the new "overview" child.
+    origItem := catalog.FlatItem{
+        Path:    promoted.OriginalPath,
+        DirPath: catalogPathToDir(promoted.OriginalPath),
+    }
+    overviewItem := catalog.FlatItem{
+        Title:   promoted.OriginalTitle,
+        Path:    promoted.OverviewPath,
+        DirPath: catalogPathToDir(promoted.OverviewPath),
+    }
+    if content, err := g.Writer.ReadPage(origItem); err == nil && content != "" {
+        if err := g.Writer.WritePage(overviewItem, content); err != nil {
+            g.Logger.Warn("failed to move page to overview", "from", promoted.OriginalPath, "error", err)
+        }
+    }
+}
+```
+
+> Source: internal/generator/updater.go#L96-L116
+
+After all pages are regenerated, navigation and index files are updated if any new pages were added. Finally, the current commit hash is saved to `_last_commit` for the next incremental update.
+
+## Data Types
+
+The update process uses two key result types returned by Claude's analysis:
+
+```go
+// UpdateMatchedResult represents a page that Claude determined needs regeneration.
 type UpdateMatchedResult struct {
     CatalogPath string `json:"catalogPath"`
     Title       string `json:"title"`
     Reason      string `json:"reason"`
 }
-```
 
-> 來源：`internal/generator/updater.go#L18-L22`
-
-### [3/4] Claude 判斷是否新增頁面
-
-針對未匹配的檔案（即現有文件中沒有引用的新檔案），呼叫 Claude CLI 評估是否應為這些檔案新增文件頁面。
-
-```go
+// UpdateUnmatchedResult represents a new page that Claude determined should be created.
 type UpdateUnmatchedResult struct {
     CatalogPath string `json:"catalogPath"`
     Title       string `json:"title"`
@@ -165,147 +276,58 @@ type UpdateUnmatchedResult struct {
 }
 ```
 
-> 來源：`internal/generator/updater.go#L24-L29`
+> Source: internal/generator/updater.go#L18-L29
 
-若 Claude 決定需要新增頁面，系統會呼叫 `addItemToCatalog` 將新頁面插入現有目錄樹，並觸發葉節點升級機制（見下方說明）。
+## Configuration
 
-### [4/4] 重新產生頁面內容
+The `update` command relies on several configuration sections from `selfmd.yaml`:
 
-對所有需要更新的頁面（已匹配需更新的 + 新增的），呼叫與 `selfmd generate` 相同的 `generateSinglePage` 流程重新產生內容。產生時會將現有頁面內容作為上下文傳入，讓 Claude 在更新時保留原有結構。
+| Config Path | Purpose |
+|-------------|---------|
+| `targets.include` | Glob patterns to include changed files |
+| `targets.exclude` | Glob patterns to exclude changed files |
+| `git.base_branch` | Fallback branch for `git merge-base` when no saved commit exists |
+| `output.dir` | Documentation output directory (default: `.doc-build`) |
+| `output.language` | Language for documentation output |
+| `claude.model` | Claude model to use for analysis and generation |
 
-```go
-// Read existing content to pass as context for regeneration
-existing, _ := g.Writer.ReadPage(item)
-err := g.generateSinglePage(ctx, scan, item, catalogTable, linkFixer, existing)
-```
+## Comparison with generate
 
-> 來源：`internal/generator/updater.go#L141-L142`
+| Aspect | `generate` | `update` |
+|--------|-----------|----------|
+| Scope | Full documentation from scratch | Only changed/new pages |
+| Git required | No (optional for commit saving) | Yes (mandatory) |
+| Catalog | Generated via Claude | Read from existing `_catalog.json` |
+| Concurrency | Configurable concurrent page generation | Sequential page regeneration |
+| Static viewer | Generated after completion | Not regenerated |
+| Cost | Higher (all pages) | Lower (only affected pages) |
 
-## 葉節點升級機制
+## Related Links
 
-當 Claude 決定在現有頁面的路徑下新增子頁面時（例如在 `core-modules.scanner` 下新增 `core-modules.scanner.advanced`），原本的葉節點（`core-modules.scanner`）需要升級為父節點。
+- [CLI Commands](../index.md)
+- [generate Command](../cmd-generate/index.md)
+- [translate Command](../cmd-translate/index.md)
+- [Incremental Update Engine](../../core-modules/incremental-update/index.md)
+- [Generation Pipeline](../../architecture/pipeline/index.md)
+- [Change Detection](../../git-integration/change-detection/index.md)
+- [Affected Page Matching](../../git-integration/affected-pages/index.md)
+- [Configuration Overview](../../configuration/config-overview/index.md)
+- [Git Integration Settings](../../configuration/git-config/index.md)
 
-系統會自動：
-1. 將原葉節點的現有內容搬移到新建的 `overview` 子頁面（如 `core-modules.scanner.overview`）
-2. 將原葉節點標記為父節點
-3. 在父節點下建立新請求的子頁面
+## Reference Files
 
-```go
-// A leaf node was promoted to a parent.
-// Move the original content to the new "overview" child.
-origItem := catalog.FlatItem{
-    Path:    promoted.OriginalPath,
-    DirPath: catalogPathToDir(promoted.OriginalPath),
-}
-overviewItem := catalog.FlatItem{
-    Title:   promoted.OriginalTitle,
-    Path:    promoted.OverviewPath,
-    DirPath: catalogPathToDir(promoted.OverviewPath),
-}
-if content, err := g.Writer.ReadPage(origItem); err == nil && content != "" {
-    if err := g.Writer.WritePage(overviewItem, content); err != nil {
-        // ...
-    }
-}
-```
-
-> 來源：`internal/generator/updater.go#L99-L116`
-
-## 變更檔案過濾
-
-系統使用與 `selfmd generate` 相同的 include/exclude 規則過濾 git 差異輸出，確保只有符合設定目標的檔案變更才會觸發文件更新。
-
-```go
-changedFiles = git.FilterChangedFiles(changedFiles, cfg.Targets.Include, cfg.Targets.Exclude)
-```
-
-> 來源：`cmd/update.go#L94`
-
-`FilterChangedFiles` 支援 doublestar glob 語法（`**/*.go`），並正確處理 git rename 格式（`R100\told\tnew`），使用目標路徑進行匹配。
-
-```go
-// git diff --name-status format: "M\tpath/to/file" or "R100\told\tnew"
-parts := strings.SplitN(line, "\t", 3)
-// For renames, check the destination path (last element)
-filePath := parts[len(parts)-1]
-```
-
-> 來源：`internal/git/git.go#L83-L91`
-
-## 輸出檔案
-
-每次 `update` 完成後，系統會更新以下持久化檔案：
-
-| 檔案 | 說明 |
-|------|------|
-| `.doc-build/_last_commit` | 記錄本次更新的 HEAD commit hash，供下次 update 使用 |
-| `.doc-build/_catalog.json` | 若有新增頁面，更新文件目錄結構 |
-| `.doc-build/<path>/index.md` | 被更新或新建的文件頁面 |
-
-## 使用範例
-
-```bash
-# 基本用法：與上次 generate/update 相比，更新有變更的文件
-selfmd update
-
-# 指定與特定 commit 比較
-selfmd update --since a1b2c3d
-
-# 開啟詳細日誌模式
-selfmd update --verbose
-
-# 指定設定檔
-selfmd update --config ./selfmd.yaml
-```
-
-典型的執行輸出：
-
-```
-比較範圍：a1b2c3d..e4f5g6h
-變更檔案：
-M       internal/scanner/scanner.go
-A       internal/scanner/filetree.go
-
-[1/4] 搜尋受影響的文件頁面...
-      2 個變更檔案已匹配到現有文件，0 個未匹配
-[2/4] 呼叫 Claude 判斷需要更新的頁面...
-      → 專案掃描器：scanner.go 的公開 API 有變更，需要更新
-       完成（1 個頁面需要更新）
-[3/4] 所有變更檔案均已有對應文件，跳過
-[4/4] 重新產生 1 個頁面...
-      [1/1] 專案掃描器（core-modules.scanner）... 完成
-
-更新完成！總費用：$0.0023 USD
-```
-
-## 前置需求錯誤處理
-
-| 條件 | 錯誤訊息 |
-|------|---------|
-| Claude CLI 不可用 | 由 `claude.CheckAvailable()` 回傳錯誤 |
-| 非 git 倉庫 | `當前目錄不是 git 倉庫，無法執行增量更新` |
-| 無法解析基準 commit | `無法取得基準 commit: ...` 並提示先執行 `selfmd generate` |
-| 未執行過 generate | `讀取現有目錄失敗（請先執行 selfmd generate）` |
-
-## 相關連結
-
-- [CLI 指令參考](../index.md)
-- [selfmd generate](../cmd-generate/index.md)
-- [Git 整合與增量更新](../../git-integration/index.md)
-- [Git Diff 變更偵測](../../git-integration/change-detection/index.md)
-- [受影響頁面判斷邏輯](../../git-integration/affected-pages/index.md)
-- [增量更新（核心模組）](../../core-modules/incremental-update/index.md)
-- [文件目錄管理](../../core-modules/catalog/index.md)
-- [Git 整合設定](../../configuration/git-config/index.md)
-
-## 參考檔案
-
-| 檔案路徑 | 說明 |
-|----------|------|
-| `cmd/update.go` | `selfmd update` CLI 指令定義、旗標宣告、前置驗證、commit 解析邏輯 |
-| `internal/generator/updater.go` | 增量更新主流程 `Update()`、匹配邏輯、Claude 判斷呼叫、葉節點升級機制 |
-| `internal/git/git.go` | git 操作封裝：`IsGitRepo`、`GetChangedFiles`、`ParseChangedFiles`、`FilterChangedFiles` |
-| `internal/output/writer.go` | `SaveLastCommit`、`ReadLastCommit`、`ReadCatalogJSON`、`WriteCatalogJSON` |
-| `internal/generator/pipeline.go` | `Generator` 結構定義、`NewGenerator` 建構函式 |
-| `internal/catalog/catalog.go` | `Catalog`、`FlatItem`、`BuildLinkTable`、`Flatten` 等目錄操作 |
-| `internal/prompt/engine.go` | `UpdateMatchedPromptData`、`UpdateUnmatchedPromptData`、`RenderUpdateMatched`、`RenderUpdateUnmatched` |
+| File Path | Description |
+|-----------|-------------|
+| `cmd/update.go` | Update command definition, flag registration, and execution flow |
+| `cmd/root.go` | Root command with global flags (`--config`, `--verbose`) |
+| `cmd/generate.go` | Generate command for comparison with update flow |
+| `internal/generator/updater.go` | Core update logic: file matching, Claude analysis, page regeneration |
+| `internal/generator/pipeline.go` | Generator struct definition and `NewGenerator` constructor |
+| `internal/generator/content_phase.go` | `generateSinglePage` implementation used for page regeneration |
+| `internal/git/git.go` | Git operations: change detection, commit resolution, file filtering |
+| `internal/config/config.go` | Configuration struct and `GitConfig` definition |
+| `internal/catalog/catalog.go` | Catalog data structures and flatten/parse operations |
+| `internal/output/writer.go` | Output writer: page read/write, commit save/load, catalog JSON I/O |
+| `internal/prompt/engine.go` | Prompt template engine and update-related data types |
+| `internal/prompt/templates/en-US/update_matched.tmpl` | Prompt template for matched file analysis |
+| `internal/prompt/templates/en-US/update_unmatched.tmpl` | Prompt template for unmatched file analysis |

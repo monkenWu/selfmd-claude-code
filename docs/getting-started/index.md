@@ -1,7 +1,7 @@
-# 快速開始
+# Getting Started
 
 This section contains the following:
 
-- [安裝與建置](installation/index.md)
-- [初始化設定](init/index.md)
-- [產生第一份文件](first-run/index.md)
+- [Installation](installation/index.md)
+- [Initialization](init/index.md)
+- [First Run](first-run/index.md)

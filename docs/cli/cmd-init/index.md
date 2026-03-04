@@ -1,76 +1,105 @@
-# selfmd init
+# init Command
 
-初始化指令，掃描當前目錄並自動偵測專案類型，產生 `selfmd.yaml` 設定檔。
+The `init` command bootstraps a new selfmd project by auto-detecting the project type and generating a `selfmd.yaml` configuration file in the current directory.
 
-## 概述
+## Overview
 
-`selfmd init` 是使用 selfmd 的第一步。執行後，它會：
+`selfmd init` is the first command users run when setting up selfmd for a new codebase. It performs automatic project detection—examining well-known manifest files (e.g., `go.mod`, `package.json`, `Cargo.toml`) to infer the project type and likely entry points—then writes a pre-populated `selfmd.yaml` configuration file that serves as the foundation for all subsequent documentation generation.
 
-1. 檢查當前目錄是否已有設定檔（預設為 `selfmd.yaml`）
-2. 呼叫 `detectProject()` 自動辨識專案類型（如 Go、Rust、Node.js、Python 等）
-3. 根據偵測結果與預設值，透過 `config.DefaultConfig()` 建立完整設定
-4. 將設定序列化為 YAML 並寫入磁碟
+Key responsibilities:
 
-產生的 `selfmd.yaml` 是後續所有 selfmd 指令的執行基礎，使用者可在初始化後依需求手動調整。
+- **Project type detection** — Identifies the project as `backend`, `frontend`, `fullstack`, or `library` based on the presence of language-specific manifest files.
+- **Entry point discovery** — Locates common entry point files (e.g., `main.go`, `src/index.ts`) that exist on disk.
+- **Default configuration generation** — Produces a complete `selfmd.yaml` with sensible defaults for targets, output, Claude settings, and Git integration.
+- **Safety guard** — Refuses to overwrite an existing config file unless the `--force` flag is provided.
 
----
-
-## 架構
+## Architecture
 
 ```mermaid
 flowchart TD
-    User["使用者執行 selfmd init"]
-    initCmd["initCmd\ncmd/init.go"]
-    checkExists{"selfmd.yaml\n已存在？"}
-    forceFlag{"--force\n旗標？"}
-    errorExit["錯誤退出"]
-    DefaultConfig["config.DefaultConfig()\ninternal/config/config.go"]
-    detectProject["detectProject()\ncmd/init.go"]
-    fillConfig["填入 ProjectName\nProjectType\nEntryPoints"]
-    Save["cfg.Save(cfgFile)\ninternal/config/config.go"]
-    printSummary["印出設定摘要"]
-
-    User --> initCmd
-    initCmd --> checkExists
-    checkExists -- 是 --> forceFlag
-    forceFlag -- 否 --> errorExit
-    forceFlag -- 是 --> DefaultConfig
-    checkExists -- 否 --> DefaultConfig
-    DefaultConfig --> detectProject
-    detectProject --> fillConfig
-    fillConfig --> Save
-    Save --> printSummary
+    User["User runs selfmd init"] --> InitCmd["initCmd (cobra.Command)"]
+    InitCmd --> CheckExist{"selfmd.yaml exists?"}
+    CheckExist -- "Yes & no --force" --> Error["Return error"]
+    CheckExist -- "No or --force" --> DefaultConfig["config.DefaultConfig()"]
+    DefaultConfig --> DetectProject["detectProject()"]
+    DetectProject --> SetFields["Set Project.Type, Project.Name, Targets.EntryPoints"]
+    SetFields --> Save["cfg.Save(cfgFile)"]
+    Save --> PrintSummary["Print config summary to stdout"]
 ```
 
----
+## Command Syntax
 
-## 旗標與參數
+```
+selfmd init [flags]
+```
 
-| 旗標 | 類型 | 預設值 | 說明 |
-|------|------|--------|------|
-| `--force` | bool | `false` | 強制覆蓋已存在的設定檔 |
-| `--config` / `-c` | string | `selfmd.yaml` | 指定設定檔路徑（繼承自根指令） |
+### Flags
 
-`--config` 旗標由根指令 `rootCmd` 定義，所有子指令皆可使用：
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--force` | `bool` | `false` | Force overwrite of an existing config file |
+| `-c, --config` | `string` | `selfmd.yaml` | Config file path (inherited from root command) |
+
+The `--config` flag is a persistent flag defined on the root command that controls the output path for the generated configuration file.
 
 ```go
-rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "selfmd.yaml", "設定檔路徑")
+var forceInit bool
+
+var initCmd = &cobra.Command{
+	Use:   "init",
+	Short: "Initialize selfmd.yaml config file",
+	Long:  "Scans the current directory, automatically detects the project type, and generates a selfmd.yaml config file.",
+	RunE:  runInit,
+}
+
+func init() {
+	initCmd.Flags().BoolVar(&forceInit, "force", false, "Force overwrite of existing config file")
+	rootCmd.AddCommand(initCmd)
+}
 ```
 
-> 來源：cmd/root.go#L31
+> Source: cmd/init.go#L13-L25
 
----
+## Core Processes
 
-## 專案類型自動偵測
+### Initialization Flow
 
-`detectProject()` 函式依序掃描當前目錄中的特定檔案，藉此推斷專案類型與入口點：
+```mermaid
+sequenceDiagram
+    participant User
+    participant initCmd as runInit
+    participant OS as os.Stat
+    participant Config as config.DefaultConfig
+    participant Detect as detectProject
+    participant Save as cfg.Save
+
+    User->>initCmd: selfmd init
+    initCmd->>OS: Check if cfgFile exists
+    alt File exists and --force not set
+        OS-->>initCmd: File found
+        initCmd-->>User: Error: config file already exists
+    else File missing or --force set
+        OS-->>initCmd: OK to proceed
+        initCmd->>Config: Create default config
+        Config-->>initCmd: *Config with defaults
+        initCmd->>Detect: Scan for project manifest files
+        Detect-->>initCmd: projectType, entryPoints
+        initCmd->>Save: Write YAML to cfgFile
+        Save-->>initCmd: Success
+        initCmd-->>User: Print config summary
+    end
+```
+
+### Project Detection Logic
+
+The `detectProject` function checks for language-specific manifest files in a fixed priority order. The first match wins.
 
 ```go
 func detectProject() (projectType string, entryPoints []string) {
 	checks := []struct {
-		file       string
-		pType      string
-		entries    []string
+		file    string
+		pType   string
+		entries []string
 	}{
 		{"go.mod", "backend", []string{"main.go", "cmd/root.go"}},
 		{"Cargo.toml", "backend", []string{"src/main.rs", "src/lib.rs"}},
@@ -82,52 +111,54 @@ func detectProject() (projectType string, entryPoints []string) {
 		{"composer.json", "backend", []string{"public/index.php", "src/Kernel.php"}},
 		{"Gemfile", "backend", []string{"config/application.rb", "app/"}},
 	}
-	// ...
+
+	for _, c := range checks {
+		if _, err := os.Stat(c.file); err == nil {
+			var found []string
+			for _, ep := range c.entries {
+				if _, err := os.Stat(ep); err == nil {
+					found = append(found, ep)
+				}
+			}
+			if c.pType == "frontend" {
+				if _, err := os.Stat("go.mod"); err == nil {
+					return "fullstack", found
+				}
+				if _, err := os.Stat("server"); err == nil {
+					return "fullstack", found
+				}
+			}
+			return c.pType, found
+		}
+	}
+
+	return "library", nil
 }
 ```
 
-> 來源：cmd/init.go#L60-L76
+> Source: cmd/init.go#L60-L99
 
-### 偵測邏輯
+The detection table covers the following ecosystems:
 
-1. **依序檢查**：依上表順序逐一偵測，命中第一個符合的即停止
-2. **入口點過濾**：候選入口點清單中只保留實際存在的檔案
-3. **Fullstack 判斷**：若偵測到 `package.json`（frontend），再額外確認 `go.mod` 或 `server/` 目錄是否存在，若有則改標記為 `fullstack`
-4. **預設類型**：若所有規則均不符合，回傳 `"library"` 與空入口點
+| Manifest File | Detected Type | Candidate Entry Points |
+|---------------|---------------|----------------------|
+| `go.mod` | `backend` | `main.go`, `cmd/root.go` |
+| `Cargo.toml` | `backend` | `src/main.rs`, `src/lib.rs` |
+| `package.json` | `frontend` | `src/index.ts`, `src/index.js`, `src/main.ts`, `src/App.tsx` |
+| `pom.xml` | `backend` | `src/main/java` |
+| `build.gradle` | `backend` | `src/main/java` |
+| `requirements.txt` | `backend` | `main.py`, `app.py`, `src/main.py` |
+| `pyproject.toml` | `backend` | `src/main.py`, `main.py` |
+| `composer.json` | `backend` | `public/index.php`, `src/Kernel.php` |
+| `Gemfile` | `backend` | `config/application.rb`, `app/` |
 
-```mermaid
-flowchart TD
-    start["開始偵測"]
-    gomod{"go.mod\n存在？"}
-    cargo{"Cargo.toml\n存在？"}
-    pkg{"package.json\n存在？"}
-    others{"其他指標\n檔案存在？"}
-    fallback["type: library\nentries: []"]
-    backendGo["type: backend"]
-    backendCargo["type: backend"]
-    frontendCheck{"同時有\ngo.mod 或 server/？"}
-    fullstack["type: fullstack"]
-    frontend["type: frontend"]
-    backendOther["type: backend"]
+**Fullstack detection:** When a `package.json` is found (indicating a frontend project), the function performs a secondary check. If `go.mod` or a `server` directory also exists, the project type is upgraded to `fullstack`.
 
-    start --> gomod
-    gomod -- 是 --> backendGo
-    gomod -- 否 --> cargo
-    cargo -- 是 --> backendCargo
-    cargo -- 否 --> pkg
-    pkg -- 是 --> frontendCheck
-    frontendCheck -- 是 --> fullstack
-    frontendCheck -- 否 --> frontend
-    pkg -- 否 --> others
-    others -- 是 --> backendOther
-    others -- 否 --> fallback
-```
+**Fallback:** If no manifest file matches, the project type defaults to `library` with no entry points.
 
----
+### Default Configuration Values
 
-## 預設設定值
-
-`config.DefaultConfig()` 回傳的預設值如下：
+When no existing configuration is found, `config.DefaultConfig()` supplies the following defaults:
 
 ```go
 func DefaultConfig() *Config {
@@ -153,7 +184,7 @@ func DefaultConfig() *Config {
 		Claude: ClaudeConfig{
 			Model:          "sonnet",
 			MaxConcurrent:  3,
-			TimeoutSeconds: 300,
+			TimeoutSeconds: 1800,
 			MaxRetries:     2,
 			AllowedTools:   []string{"Read", "Glob", "Grep"},
 			ExtraArgs:      []string{},
@@ -166,123 +197,82 @@ func DefaultConfig() *Config {
 }
 ```
 
-> 來源：internal/config/config.go#L96-L129
+> Source: internal/config/config.go#L96-L129
 
-`init` 指令在預設值基礎上，以偵測結果覆寫以下三個欄位：
+After creating the default config, `runInit` overrides three fields based on detection results:
 
-| 欄位 | 覆寫來源 |
-|------|----------|
-| `project.name` | `filepath.Base(mustCwd())` — 當前目錄名稱 |
-| `project.type` | `detectProject()` 偵測結果 |
-| `targets.entry_points` | `detectProject()` 偵測到的實際入口點 |
+- `Project.Type` — from `detectProject()`
+- `Project.Name` — set to the current directory's base name via `filepath.Base(mustCwd())`
+- `Targets.EntryPoints` — only the candidate entry points that actually exist on disk
 
----
+## Usage Examples
 
-## 核心流程
-
-```mermaid
-sequenceDiagram
-    participant CLI as 使用者終端
-    participant initCmd as initCmd（cmd/init.go）
-    participant config as config（internal/config）
-    participant OS as 作業系統檔案系統
-
-    CLI->>initCmd: selfmd init [--force]
-    initCmd->>OS: os.Stat(cfgFile)
-    alt 設定檔已存在且未帶 --force
-        initCmd-->>CLI: 錯誤：設定檔已存在
-    end
-    initCmd->>config: config.DefaultConfig()
-    config-->>initCmd: *Config（預設值）
-    initCmd->>OS: 逐一 os.Stat 偵測指標檔案
-    OS-->>initCmd: 存在/不存在
-    initCmd->>initCmd: 決定 projectType 與 entryPoints
-    initCmd->>initCmd: 填入 cfg.Project / cfg.Targets
-    initCmd->>config: cfg.Save(cfgFile)
-    config->>OS: yaml.Marshal → os.WriteFile
-    OS-->>config: 寫入成功
-    config-->>initCmd: nil
-    initCmd-->>CLI: 印出設定摘要
-```
-
----
-
-## 輸出摘要說明
-
-指令執行成功後，終端會印出以下資訊：
-
-```
-已建立設定檔：selfmd.yaml
-  專案名稱：my-project
-  專案類型：backend
-  輸出目錄：.doc-build
-  文件語言：zh-TW
-  入口檔案：main.go, cmd/root.go
-
-請根據專案需求編輯設定檔後，執行 selfmd generate 產生文件。
-```
-
-> 來源：cmd/init.go#L43-L56
-
----
-
-## 使用範例
-
-### 基本初始化
+**Basic initialization in a Go project:**
 
 ```bash
-selfmd init
+$ cd my-go-project
+$ selfmd init
+Config file created: selfmd.yaml
+  Project name: my-go-project
+  Project type: backend
+  Output dir: .doc-build
+  Doc language: zh-TW
+  Entry points: main.go, cmd/root.go
+
+Please edit the config file as needed, then run selfmd generate to generate documentation.
 ```
 
-在當前目錄產生 `selfmd.yaml`。若偵測到 `go.mod` 與 `cmd/root.go`，設定檔將包含：
-
-```yaml
-project:
-  name: my-project
-  type: backend
-targets:
-  entry_points:
-    - cmd/root.go
-```
-
-### 強制覆蓋既有設定檔
+**Force overwrite an existing config:**
 
 ```bash
-selfmd init --force
+$ selfmd init --force
+Config file created: selfmd.yaml
+  ...
 ```
 
-> 來源：cmd/init.go#L28-L30
-
-### 指定自訂設定檔路徑
+**Use a custom config path:**
 
 ```bash
-selfmd init --config config/selfmd.yaml
+$ selfmd init --config my-docs.yaml
+Config file created: my-docs.yaml
+  ...
 ```
 
----
+The output summary is produced by the following code:
 
-## 注意事項
+```go
+fmt.Printf("Config file created: %s\n", cfgFile)
+fmt.Printf("  Project name: %s\n", cfg.Project.Name)
+fmt.Printf("  Project type: %s\n", cfg.Project.Type)
+fmt.Printf("  Output dir: %s\n", cfg.Output.Dir)
+fmt.Printf("  Doc language: %s\n", cfg.Output.Language)
+if len(cfg.Output.SecondaryLanguages) > 0 {
+    fmt.Printf("  Secondary languages: %s\n", strings.Join(cfg.Output.SecondaryLanguages, ", "))
+}
 
-- `selfmd init` 不會覆寫 `targets.include` 與 `targets.exclude`，這兩個欄位維持預設值，需使用者視需求手動調整
-- 若專案同時符合多個偵測條件（如同時有 `go.mod` 與 `package.json`），僅最先命中的規則生效
-- 產生的 `selfmd.yaml` 使用 YAML v3 格式序列化
+if len(cfg.Targets.EntryPoints) > 0 {
+    fmt.Printf("  Entry points: %s\n", strings.Join(cfg.Targets.EntryPoints, ", "))
+}
 
----
+fmt.Println("\nPlease edit the config file as needed, then run selfmd generate to generate documentation.")
+```
 
-## 相關連結
+> Source: cmd/init.go#L43-L57
 
-- [初始化設定](../../getting-started/init/index.md)
-- [selfmd.yaml 結構總覽](../../configuration/config-overview/index.md)
-- [專案與掃描目標設定](../../configuration/project-targets/index.md)
-- [selfmd generate](../cmd-generate/index.md)
-- [CLI 指令參考](../index.md)
+## Related Links
 
----
+- [CLI Commands](../index.md)
+- [generate Command](../cmd-generate/index.md)
+- [Configuration Overview](../../configuration/config-overview/index.md)
+- [Project Targets](../../configuration/project-targets/index.md)
+- [Initialization (Getting Started)](../../getting-started/init/index.md)
 
-## 參考檔案
+## Reference Files
 
-| 檔案路徑 | 說明 |
-|----------|------|
-| `cmd/init.go` | `init` 指令實作、`detectProject()` 偵測邏輯 |
-| `cmd/root.go` | 根指令定義，含 `--config`、`--verbose`、`--quiet` 全域旗標 |
-| `internal/config/config.go` | `Config` 結構定義、`DefaultConfig()`、`Save()`、`Load()` 實作 |
+| File Path | Description |
+|-----------|-------------|
+| `cmd/init.go` | init command implementation, project detection logic |
+| `cmd/root.go` | Root command definition, persistent flags (`--config`, `--verbose`, `--quiet`) |
+| `internal/config/config.go` | Config struct definitions, `DefaultConfig()`, `Save()`, and validation |
+| `cmd/generate.go` | generate command (referenced for downstream workflow context) |
+| `selfmd.yaml` | Real-world example of a generated config file |

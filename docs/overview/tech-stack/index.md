@@ -1,326 +1,324 @@
-# 技術棧與相依套件
+# Tech Stack
 
-selfmd 以純 Go 實作，相依套件精簡，僅引入四個直接外部依賴，其餘功能均仰賴 Go 標準函式庫完成。
+SelfMD is built entirely in Go and relies on the Claude Code CLI as its AI backbone. This page details the programming language, frameworks, libraries, and external tools that make up the project.
 
-## 概述
+## Overview
 
-selfmd 的設計目標之一是保持輕量、易於安裝。整個工具鏈除了 Go 執行環境本身之外，在執行期還需要兩個外部 CLI 工具：
+SelfMD is a command-line tool written in **Go (Golang)** that automatically generates structured technical documentation for any codebase. It orchestrates the Claude Code CLI as a subprocess, feeding it rendered prompt templates and parsing the JSON responses. The output is a set of Markdown files plus a self-contained static HTML/JS/CSS viewer that can be opened directly in a browser or deployed to GitHub Pages.
 
-- **Claude Code CLI**（`claude`）：作為 AI 後端，負責分析原始碼並產生文件內容
-- **Git CLI**（`git`）：用於增量更新時偵測原始碼的變更
+Key technology choices:
 
-這兩個外部工具不透過 Go 套件管理，而是透過 `os/exec` 呼叫系統中已安裝的執行檔。
+- **Go** — statically compiled, single-binary distribution for all major platforms
+- **Claude Code CLI** — AI-powered code analysis and documentation generation
+- **YAML** — human-friendly project configuration
+- **Go `embed`** — prompt templates and viewer assets are embedded into the binary at compile time
+- **Go `text/template`** — prompt rendering with language-aware template sets
 
-## 架構
+## Architecture
 
 ```mermaid
-graph TD
-    subgraph GoStdLib["Go 標準函式庫"]
-        embed["embed\n（嵌入模板）"]
-        slog["log/slog\n（結構化日誌）"]
-        exec["os/exec\n（子行程執行）"]
-        tmpl["text/template\n（模板渲染）"]
-        json["encoding/json\n（JSON 序列化）"]
-        ctx["context\n（逾時控制）"]
-        sync_pkg["sync / sync/atomic\n（並行原語）"]
-    end
+flowchart TD
+    User["User (CLI)"]
+    Cobra["spf13/cobra<br/>Command Router"]
+    Config["config.Config<br/>YAML Parser (gopkg.in/yaml.v3)"]
+    Scanner["scanner.Scan<br/>File Walker + doublestar Glob"]
+    Engine["prompt.Engine<br/>text/template + embed.FS"]
+    Runner["claude.Runner<br/>os/exec → claude CLI"]
+    Generator["generator.Generator<br/>Pipeline Orchestrator"]
+    Git["git Package<br/>os/exec → git CLI"]
+    Writer["output.Writer<br/>File I/O"]
+    Viewer["output.WriteViewer<br/>Embedded HTML/JS/CSS"]
+    ErrGroup["golang.org/x/sync/errgroup<br/>Concurrency Control"]
 
-    subgraph ExternalDeps["外部相依套件"]
-        cobra["cobra v1.10.2\n（CLI 框架）"]
-        pflag["pflag v1.0.9\n（旗標解析，間接）"]
-        doublestar["doublestar v4.10.0\n（Glob 比對）"]
-        errgroup["x/sync v0.19.0\n（errgroup 並行）"]
-        yaml["yaml.v3 v3.0.1\n（YAML 解析）"]
-        mousetrap["mousetrap v1.1.0\n（Windows 相容，間接）"]
-    end
-
-    subgraph ExternalTools["外部執行工具（非 Go 套件）"]
-        claude_cli["Claude Code CLI\n（claude 指令）"]
-        git_cli["Git CLI\n（git 指令）"]
-    end
-
-    cobra --> pflag
-    cobra --> mousetrap
-
-    cmd_pkg["cmd/*"] --> cobra
-    scanner_pkg["internal/scanner"] --> doublestar
-    git_pkg["internal/git"] --> doublestar
-    config_pkg["internal/config"] --> yaml
-    prompt_pkg["internal/prompt"] --> embed
-    prompt_pkg --> tmpl
-    claude_pkg["internal/claude"] --> exec
-    claude_pkg --> json
-    claude_pkg --> slog
-    claude_pkg --> ctx
-    git_pkg --> exec
-    generator_pkg["internal/generator"] --> errgroup
-    generator_pkg --> sync_pkg
-    output_pkg["internal/output"] --> json
-
-    claude_pkg --> claude_cli
-    git_pkg --> git_cli
+    User --> Cobra
+    Cobra --> Config
+    Cobra --> Generator
+    Generator --> Scanner
+    Generator --> Engine
+    Generator --> Runner
+    Generator --> Git
+    Generator --> Writer
+    Generator --> ErrGroup
+    Writer --> Viewer
 ```
 
-## 相依套件詳細說明
+## Programming Language
 
-### 直接相依套件
-
-| 套件 | 版本 | 用途 | 使用位置 |
-|------|------|------|----------|
-| `github.com/spf13/cobra` | v1.10.2 | CLI 指令框架 | `cmd/root.go`、所有指令檔案 |
-| `github.com/bmatcuk/doublestar/v4` | v4.10.0 | 雙星號（`**`）Glob 模式比對 | `internal/scanner/scanner.go`、`internal/git/git.go` |
-| `golang.org/x/sync` | v0.19.0 | `errgroup` 並行任務群組 | `internal/generator/content_phase.go`、`translate_phase.go` |
-| `gopkg.in/yaml.v3` | v3.0.1 | YAML 設定檔解析與序列化 | `internal/config/config.go` |
-
-### 間接相依套件
-
-| 套件 | 版本 | 說明 |
-|------|------|------|
-| `github.com/spf13/pflag` | v1.0.9 | cobra 的旗標解析底層實作 |
-| `github.com/inconshreveable/mousetrap` | v1.1.0 | cobra 在 Windows 平台的相容性支援 |
-
-> 來源：`go.mod#L1-L15`
+SelfMD targets **Go 1.25.7** as declared in its module file. The project compiles to native binaries for six platform targets: Linux (amd64, arm64), macOS (amd64, arm64), and Windows (amd64, arm64).
 
 ```go
 module github.com/monkenwu/selfmd
 
 go 1.25.7
+```
 
+> Source: go.mod#L1-L3
+
+## Dependencies
+
+### Direct Dependencies
+
+| Library | Version | Purpose |
+|---------|---------|---------|
+| `github.com/spf13/cobra` | v1.10.2 | CLI command framework — defines `generate`, `init`, `update`, `translate` subcommands |
+| `gopkg.in/yaml.v3` | v3.0.1 | YAML parsing and serialization for `selfmd.yaml` configuration |
+| `github.com/bmatcuk/doublestar/v4` | v4.10.0 | Globstar (`**`) pattern matching for file include/exclude filters |
+| `golang.org/x/sync` | v0.19.0 | `errgroup` for bounded concurrent page generation and translation |
+
+### Indirect Dependencies
+
+| Library | Version | Purpose |
+|---------|---------|---------|
+| `github.com/inconshreveable/mousetrap` | v1.1.0 | Windows shell detection (required by Cobra) |
+| `github.com/spf13/pflag` | v1.0.9 | POSIX-compliant flag parsing (required by Cobra) |
+
+```go
 require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sync v0.19.0
 	gopkg.in/yaml.v3 v3.0.1
 )
-
-require (
-	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/spf13/pflag v1.0.9 // indirect
-)
 ```
 
-> 來源：`go.mod#L1-L15`
+> Source: go.mod#L5-L10
 
----
+## Standard Library Usage
 
-### cobra — CLI 框架
+SelfMD makes extensive use of Go's standard library, avoiding third-party dependencies where built-in packages suffice:
 
-`cobra` 負責建立所有子指令（`init`、`generate`、`update`、`translate`）的路由結構、旗標定義，以及使用說明的自動生成。
+| Package | Used In | Purpose |
+|---------|---------|---------|
+| `embed` | `prompt.Engine`, `output.WriteViewer` | Compile-time embedding of prompt templates and viewer assets |
+| `text/template` | `prompt.Engine` | Rendering prompt templates with context data |
+| `encoding/json` | `claude.Parser`, `catalog.Catalog` | Parsing Claude CLI JSON output and catalog serialization |
+| `os/exec` | `claude.Runner`, `git` package | Spawning `claude` and `git` subprocesses |
+| `log/slog` | All modules | Structured logging throughout the pipeline |
+| `context` | `generator.Generator`, `claude.Runner` | Timeout management and signal-based cancellation |
+| `sync/atomic` | `content_phase`, `translate_phase` | Lock-free progress counters for concurrent generation |
+| `regexp` | `claude.Parser`, `translate_phase` | Extracting JSON blocks, markdown fences, and headings from Claude responses |
+| `path/filepath` | `scanner`, `output`, `catalog` | Cross-platform path manipulation |
 
-```go
-var rootCmd = &cobra.Command{
-	Use:   "selfmd",
-	Short: "selfmd — 專案文件自動產生器",
-	Long: `selfmd 是一個 CLI 工具，透過本地 Claude Code CLI 作為 AI 後端，
-自動掃描專案目錄並產生結構化的 Wiki 風格繁體中文技術文件。`,
-}
-```
+### Embed Directives
 
-> 來源：`cmd/root.go#L17-L25`
-
----
-
-### doublestar — Glob 模式比對
-
-Go 標準函式庫的 `filepath.Match` 不支援 `**` 雙星號（遞迴目錄比對）。`doublestar` 填補了這個空缺，讓使用者可以在 `selfmd.yaml` 中使用如 `internal/**` 或 `**/*.pb.go` 這類模式。
-
-```go
-// check excludes
-for _, pattern := range cfg.Targets.Exclude {
-    matched, _ := doublestar.Match(pattern, rel)
-    if matched {
-        if d.IsDir() {
-            return filepath.SkipDir
-        }
-        return nil
-    }
-}
-```
-
-> 來源：`internal/scanner/scanner.go#L33-L41`
-
----
-
-### golang.org/x/sync（errgroup）— 並行任務管控
-
-`errgroup.WithContext` 搭配 channel 作為 semaphore，管控同時執行的 Claude CLI 呼叫數量，防止超過設定的 `max_concurrent` 上限。
-
-```go
-eg, ctx := errgroup.WithContext(ctx)
-sem := make(chan struct{}, concurrency)
-
-for _, item := range items {
-    item := item
-    eg.Go(func() error {
-        sem <- struct{}{}
-        defer func() { <-sem }()
-        // ... generate page
-        return nil
-    })
-}
-```
-
-> 來源：`internal/generator/content_phase.go#L37-L50`
-
----
-
-### yaml.v3 — 設定檔解析
-
-設定檔 `selfmd.yaml` 的讀取與寫入均透過 `yaml.v3` 完成。`Load` 函式先建立含預設值的 `Config` 物件，再用 YAML Unmarshal 覆蓋使用者定義的欄位。
-
-```go
-func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	// ...
-	cfg := DefaultConfig()
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("設定檔格式錯誤: %w", err)
-	}
-	// ...
-}
-```
-
-> 來源：`internal/config/config.go#L131-L147`
-
----
-
-## Go 標準函式庫重點用法
-
-| 套件 | 用途 | 使用模組 |
-|------|------|----------|
-| `embed` | 編譯期嵌入 Prompt 模板（`.tmpl` 檔） | `internal/prompt/engine.go` |
-| `text/template` | 渲染 Prompt 模板，將資料注入文字 | `internal/prompt/engine.go` |
-| `os/exec` | 呼叫 `claude` 和 `git` 子行程 | `internal/claude/runner.go`、`internal/git/git.go` |
-| `log/slog` | 結構化日誌（Go 1.21+ 內建） | `internal/claude/runner.go`、`internal/generator/pipeline.go` |
-| `encoding/json` | 目錄（Catalog）的 JSON 序列化 | `internal/catalog/catalog.go`、`internal/claude/parser.go` |
-| `context` | 子行程逾時控制與取消 | `internal/claude/runner.go` |
-| `sync` / `sync/atomic` | 並行計數器（完成數、失敗數、跳過數） | `internal/generator/content_phase.go` |
-| `path/filepath` | 跨平台路徑操作 | 多處 |
-
-### embed — 編譯期嵌入模板
-
-`//go:embed` 指示詞將 `templates/` 目錄下所有 `.tmpl` 檔案在編譯時打包進二進位執行檔，使用者無需額外部署模板檔案。
+Prompt templates and viewer assets are embedded into the binary using Go's `//go:embed` directive:
 
 ```go
 //go:embed templates/*/*.tmpl templates/*.tmpl
 var templateFS embed.FS
 ```
 
-> 來源：`internal/prompt/engine.go#L10-L11`
-
-### log/slog — 結構化日誌
-
-`slog` 是 Go 1.21 引入的標準結構化日誌套件，取代了過去常見的第三方日誌函式庫。selfmd 以 `slog.Logger` 作為內部日誌介面，統一傳入各模組。
+> Source: internal/prompt/engine.go#L10-L11
 
 ```go
-r.logger.Debug("claude completed",
-    "duration", elapsed.Round(time.Millisecond),
-    "cost_usd", result.CostUSD,
-    "is_error", result.IsError,
-)
+//go:embed viewer/index.html
+var viewerHTML string
+
+//go:embed viewer/app.js
+var viewerJS string
+
+//go:embed viewer/style.css
+var viewerCSS string
 ```
 
-> 來源：`internal/claude/runner.go#L103-L108`
+> Source: internal/output/viewer.go#L13-L20
 
----
+## External CLI Tools
 
-## 外部執行工具相依性
+SelfMD depends on two external CLI tools available on `$PATH`:
 
 ### Claude Code CLI
 
-selfmd 的 AI 能力來自於呼叫本地安裝的 `claude` CLI，而非直接整合 Anthropic API SDK。這樣的設計讓使用者可以沿用已有的 Claude Code 授權與設定。
+The Claude Code CLI (`claude`) is the core AI engine. SelfMD invokes it as a subprocess with JSON output mode, piping prompts via stdin:
 
 ```go
-cmd := exec.CommandContext(ctx, "claude", args...)
+args := []string{
+	"-p",
+	"--output-format", "json",
+}
 // ...
+cmd := exec.CommandContext(ctx, "claude", args...)
 cmd.Stdin = strings.NewReader(opts.Prompt)
 ```
 
-> 來源：`internal/claude/runner.go#L69-L75`
+> Source: internal/claude/runner.go#L32-L75
 
-啟動前會先驗證 `claude` 是否可執行：
+The runner supports model selection, tool restrictions (`--allowedTools`, `--disallowedTools`), configurable timeouts, and automatic retry with linear backoff:
 
 ```go
-func CheckAvailable() error {
-	_, err := exec.LookPath("claude")
-	if err != nil {
-		return fmt.Errorf("找不到 claude CLI。請先安裝 Claude Code：https://docs.anthropic.com/en/docs/claude-code")
+func (r *Runner) RunWithRetry(ctx context.Context, opts RunOptions) (*RunResult, error) {
+	maxRetries := r.config.MaxRetries
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(attempt) * 5 * time.Second
+			// ...
+		}
+		result, err := r.Run(ctx, opts)
+		if err == nil && !result.IsError {
+			return result, nil
+		}
+		// ...
 	}
-	return nil
+	return nil, fmt.Errorf("all %d attempts failed: %w", maxRetries+1, lastErr)
 }
 ```
 
-> 來源：`internal/claude/runner.go#L146-L152`
+> Source: internal/claude/runner.go#L113-L143
 
 ### Git CLI
 
-增量更新功能透過執行 `git diff`、`git rev-parse` 等指令偵測原始碼變更，不依賴任何 Go 的 Git 函式庫：
+The `git` CLI is used for change detection in incremental updates. All interactions go through the `internal/git` package:
 
 ```go
-func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	// ...
+func GetChangedFilesSince(dir, sinceCommit string) (string, error) {
+	return runGit(dir, "diff", "--relative", "--name-status", sinceCommit+"..HEAD")
 }
 ```
 
-> 來源：`internal/git/git.go#L124-L141`
+> Source: internal/git/git.go#L38-L40
 
----
+## Concurrency Model
 
-## 核心流程
+Content generation and translation use `golang.org/x/sync/errgroup` with a semaphore channel to limit concurrency to the configured `max_concurrent` value:
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant cobra
-    participant config_yaml as yaml.v3
-    participant scanner_ds as doublestar
-    participant prompt_embed as embed / text/template
-    participant runner_exec as os/exec（claude）
-    participant gen_eg as errgroup（x/sync）
-    participant git_exec as os/exec（git）
+```go
+eg, ctx := errgroup.WithContext(ctx)
+sem := make(chan struct{}, concurrency)
 
-    User->>cobra: selfmd generate
-    cobra->>config_yaml: 載入 selfmd.yaml
-    cobra->>scanner_ds: 掃描目錄（Glob 過濾）
-    cobra->>prompt_embed: 渲染 Prompt 模板
-    cobra->>gen_eg: 啟動並行任務群組
-    loop 每個文件頁面（受 semaphore 限制）
-        gen_eg->>runner_exec: 呼叫 claude CLI
-        runner_exec-->>gen_eg: 回傳 JSON 結果
-    end
-    cobra->>git_exec: 儲存目前 commit（供增量更新）
+for _, item := range items {
+	item := item
+	eg.Go(func() error {
+		sem <- struct{}{}
+		defer func() { <-sem }()
+		// ... generate page ...
+		return nil
+	})
+}
+
+if err := eg.Wait(); err != nil {
+	return err
+}
 ```
 
----
+> Source: internal/generator/content_phase.go#L36-L76
 
-## 相關連結
+Progress counters (`done`, `failed`, `skipped`) use `sync/atomic.Int32` for lock-free updates across goroutines.
 
-- [整體流程與四階段管線](../../architecture/pipeline/index.md)
-- [Claude CLI 執行器](../../core-modules/claude-runner/index.md)
-- [專案掃描器](../../core-modules/scanner/index.md)
-- [Prompt 模板引擎](../../core-modules/prompt-engine/index.md)
-- [設定說明](../../configuration/index.md)
-- [Git 整合設定](../../configuration/git-config/index.md)
+## Configuration Format
 
----
+Project configuration is stored in `selfmd.yaml` and parsed using `gopkg.in/yaml.v3`. The `Config` struct maps directly to the YAML structure:
 
-## 參考檔案
+```go
+type Config struct {
+	Project ProjectConfig `yaml:"project"`
+	Targets TargetsConfig `yaml:"targets"`
+	Output  OutputConfig  `yaml:"output"`
+	Claude  ClaudeConfig  `yaml:"claude"`
+	Git     GitConfig     `yaml:"git"`
+}
+```
 
-| 檔案路徑 | 說明 |
-|----------|------|
-| `go.mod` | Go 模組定義，含所有直接與間接相依套件 |
-| `cmd/root.go` | cobra 根指令定義，展示 CLI 框架使用方式 |
-| `internal/config/config.go` | yaml.v3 用於設定檔解析的實作 |
-| `internal/scanner/scanner.go` | doublestar 用於 include/exclude 模式比對 |
-| `internal/git/git.go` | os/exec 呼叫 git CLI 的實作 |
-| `internal/claude/runner.go` | os/exec 呼叫 claude CLI、log/slog 使用範例 |
-| `internal/claude/types.go` | Claude CLI 回應的 JSON 型別定義 |
-| `internal/prompt/engine.go` | embed + text/template 嵌入並渲染模板 |
-| `internal/generator/content_phase.go` | errgroup + channel semaphore 並行控制 |
-| `internal/generator/pipeline.go` | 整體管線，展示各模組如何整合 |
-| `internal/catalog/catalog.go` | encoding/json 用於目錄的序列化 |
-| `internal/output/writer.go` | 輸出寫入，展示標準 os 套件使用 |
-| `internal/output/navigation.go` | 導航頁面生成實作 |
-| `internal/scanner/filetree.go` | 檔案樹資料結構定義（ScanResult、FileNode） |
+> Source: internal/config/config.go#L11-L17
+
+## Prompt Template System
+
+Prompts are organized as Go `text/template` files in language-specific directories, embedded at compile time:
+
+```
+templates/
+├── zh-TW/
+│   ├── catalog.tmpl
+│   ├── content.tmpl
+│   ├── update_matched.tmpl
+│   ├── update_unmatched.tmpl
+│   └── updater.tmpl
+├── en-US/
+│   ├── catalog.tmpl
+│   ├── content.tmpl
+│   ├── update_matched.tmpl
+│   ├── update_unmatched.tmpl
+│   └── updater.tmpl
+├── translate.tmpl
+└── translate_titles.tmpl
+```
+
+The engine loads language-specific templates on initialization and falls back to `en-US` for unsupported languages:
+
+```go
+func (o *OutputConfig) GetEffectiveTemplateLang() string {
+	for _, lang := range SupportedTemplateLangs {
+		if o.Language == lang {
+			return o.Language
+		}
+	}
+	return "en-US"
+}
+```
+
+> Source: internal/config/config.go#L58-L65
+
+## Static Viewer
+
+The output includes a self-contained documentation viewer built with vanilla HTML, JavaScript, and CSS (no framework dependencies). The viewer assets are embedded into the Go binary and written to the output directory during generation:
+
+- `index.html` — SPA shell with project name and language injected
+- `app.js` — client-side Markdown rendering and navigation
+- `style.css` — documentation theme
+- `_data.js` — bundled JSON containing all catalog data and Markdown page content
+
+This bundle approach enables fully offline/serverless documentation viewing — simply open `index.html` in a browser.
+
+## Build and Distribution
+
+SelfMD compiles to standalone binaries with no runtime dependencies (beyond the `claude` and `git` CLIs). Pre-built binaries are provided for six platforms:
+
+| Platform | Binary |
+|----------|--------|
+| Linux amd64 | `bin/selfmd-linux-amd64` |
+| Linux arm64 | `bin/selfmd-linux-arm64` |
+| macOS amd64 | `bin/selfmd-macos-amd64` |
+| macOS arm64 | `bin/selfmd-macos-arm64` |
+| Windows amd64 | `bin/selfmd-windows-amd64.exe` |
+| Windows arm64 | `bin/selfmd-windows-arm64.exe` |
+
+## Related Links
+
+- [Introduction](../introduction/index.md)
+- [Output Structure](../output-structure/index.md)
+- [Configuration Overview](../../configuration/config-overview/index.md)
+- [Claude Settings](../../configuration/claude-config/index.md)
+- [System Architecture](../../architecture/index.md)
+- [Claude Runner](../../core-modules/claude-runner/index.md)
+- [Prompt Engine](../../core-modules/prompt-engine/index.md)
+
+## Reference Files
+
+| File Path | Description |
+|-----------|-------------|
+| `go.mod` | Go module definition and dependency declarations |
+| `go.sum` | Dependency checksums |
+| `main.go` | Application entry point |
+| `cmd/root.go` | Root Cobra command and global flags |
+| `cmd/generate.go` | Generate command implementation with signal handling |
+| `internal/config/config.go` | Configuration struct, YAML loading, validation, and defaults |
+| `internal/claude/runner.go` | Claude CLI subprocess invocation with retry logic |
+| `internal/claude/types.go` | RunOptions, RunResult, and CLIResponse type definitions |
+| `internal/claude/parser.go` | JSON/Markdown response parsing and extraction utilities |
+| `internal/generator/pipeline.go` | 4-phase generation pipeline orchestrator |
+| `internal/generator/catalog_phase.go` | Catalog generation via Claude |
+| `internal/generator/content_phase.go` | Concurrent content page generation with errgroup |
+| `internal/generator/index_phase.go` | Index and sidebar navigation generation |
+| `internal/generator/translate_phase.go` | Translation pipeline with concurrent page translation |
+| `internal/generator/updater.go` | Incremental update engine with git change matching |
+| `internal/scanner/scanner.go` | Project directory scanner with glob-based filtering |
+| `internal/scanner/filetree.go` | File tree data structure and rendering |
+| `internal/git/git.go` | Git CLI wrapper for change detection |
+| `internal/prompt/engine.go` | Prompt template engine with embedded FS |
+| `internal/output/writer.go` | Documentation file writer and catalog persistence |
+| `internal/output/viewer.go` | Static viewer generation with embedded HTML/JS/CSS |
+| `internal/output/navigation.go` | Index, sidebar, and category page generation |
+| `internal/output/linkfixer.go` | Relative link validation and correction |
+| `internal/catalog/catalog.go` | Catalog data model, JSON parsing, and tree flattening |
+| `selfmd.yaml` | Project configuration file |

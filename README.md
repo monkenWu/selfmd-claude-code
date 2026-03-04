@@ -23,6 +23,8 @@ Writing and maintaining technical documentation is painful. It falls out of date
 - **Fault-Tolerant** — Failed pages get placeholder content instead of aborting the entire run. Re-run to retry only the failed pages.
 - **Parallel Generation** — Configurable concurrency for faster documentation generation on large projects.
 
+![SelfMD Demo Docs](https://monkenwu.github.io/selfmd-claude-code)
+
 ---
 
 ## Quick Start

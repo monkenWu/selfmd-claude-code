@@ -1,189 +1,252 @@
-# 內容頁面產生階段
+# Content Phase
 
-內容頁面產生階段（Phase 3）是 selfmd 四階段管線的核心，負責將目錄中的每個條目平行地轉換為完整的 Markdown 文件頁面。
+The Content Phase is Phase 3 of selfmd's 4-phase documentation generation pipeline. It takes a flattened catalog and concurrently generates Markdown documentation pages for each catalog item by invoking the Claude CLI.
 
-## 概述
+## Overview
 
-當目錄（Catalog）建立完畢後，內容產生階段接手，對目錄中每一個 `FlatItem`（扁平化目錄項目）呼叫 Claude CLI，要求其根據專案原始碼產生對應的說明文件。
+The Content Phase is responsible for the bulk of the documentation generation work. After the catalog has been created in Phase 2, this phase iterates over every catalog item, renders a prompt with project context, sends it to Claude, validates the response, post-processes links, and writes the resulting Markdown page to disk.
 
-此階段的主要職責包括：
+Key responsibilities:
 
-- **並行控制**：透過 `errgroup` 與 semaphore 實現可設定的並行度，同時保護系統資源
-- **跳過既有頁面**：非 clean 模式下，已存在且有效的頁面將被略過，節省 API 費用
-- **重試與格式驗證**：確保 Claude 輸出符合格式要求（必須有 `<document>` 標籤且包含 Markdown 標題）
-- **連結修復後處理**：產生後自動修復頁面內的相對路徑連結
-- **失敗降級**：頁面產生失敗時寫入佔位頁面，不中斷整體流程
+- **Concurrent page generation** — Uses Go's `errgroup` with a semaphore to generate multiple pages in parallel, controlled by the `max_concurrent` configuration setting.
+- **Prompt assembly** — Populates `ContentPromptData` with project metadata, the file tree, catalog link table, and page-specific context, then renders it via the `content.tmpl` template.
+- **Response validation** — Extracts content from `<document>` XML tags and verifies it begins with a Markdown heading (`#`). Retries up to 2 attempts on format errors.
+- **Link post-processing** — Runs `LinkFixer.FixLinks` on the generated content to correct broken relative links before writing.
+- **Skip-existing optimization** — When not performing a clean build, pages that already exist on disk with valid content are skipped.
+- **Failure resilience** — Failed pages receive placeholder content rather than aborting the entire generation run.
 
-核心實作位於 `internal/generator/content_phase.go`，主要入口為 `Generator.GenerateContent()`。
-
-## 架構
+## Architecture
 
 ```mermaid
 flowchart TD
-    GC["GenerateContent()"] --> FL["cat.Flatten()"]
-    GC --> BLT["cat.BuildLinkTable()"]
-    GC --> NLF["output.NewLinkFixer()"]
-    GC --> EG["errgroup + semaphore channel"]
+    GC["GenerateContent()"]
+    GSP["generateSinglePage()"]
+    PE["prompt.Engine"]
+    CR["claude.Runner"]
+    EDT["claude.ExtractDocumentTag()"]
+    LF["output.LinkFixer"]
+    OW["output.Writer"]
+    CAT["catalog.Catalog"]
 
-    EG --> CHK["Writer.PageExists()"]
-    CHK -- "skipExisting && 已存在" --> SKIP["atomic skipped++"]
-    CHK -- "需要產生" --> GSP["generateSinglePage()"]
-
-    GSP --> CPD["ContentPromptData 組裝"]
-    CPD --> RND["Engine.RenderContent()"]
-    RND --> RWR["Runner.RunWithRetry()"]
-    RWR --> EDT["ExtractDocumentTag()"]
-    EDT --> VAL{"格式驗證"}
-    VAL -- "通過" --> LFX["LinkFixer.FixLinks()"]
-    LFX --> WP["Writer.WritePage()"]
-    VAL -- "失敗，可重試" --> RWR
-    VAL -- "超過最大嘗試次數" --> ERR["atomic failed++"]
-    ERR --> WPH["writePlaceholder()"]
+    GC -->|"Flatten items"| CAT
+    CAT -->|"BuildLinkTable()"| GC
+    GC -->|"NewLinkFixer()"| LF
+    GC -->|"For each FlatItem"| GSP
+    GSP -->|"RenderContent()"| PE
+    GSP -->|"RunWithRetry()"| CR
+    CR -->|"Raw response"| EDT
+    EDT -->|"Extracted Markdown"| GSP
+    GSP -->|"FixLinks()"| LF
+    GSP -->|"WritePage()"| OW
 ```
 
-## 主要元件與資料結構
+## Core Components
 
-### Generator 結構體
+### GenerateContent — Concurrent Orchestrator
 
-`Generator` 是整個管線的協調者，在 `pipeline.go` 中定義：
+`GenerateContent` is the entry point for the Content Phase. It flattens the catalog into a list of `FlatItem` values, builds shared resources (the catalog link table and link fixer), and launches concurrent goroutines for each item.
 
 ```go
-type Generator struct {
-    Config  *config.Config
-    Runner  *claude.Runner
-    Engine  *prompt.Engine
-    Writer  *output.Writer
-    Logger  *slog.Logger
-    RootDir string
+func (g *Generator) GenerateContent(ctx context.Context, scan *scanner.ScanResult, cat *catalog.Catalog, concurrency int, skipExisting bool) error {
+	items := cat.Flatten()
+	total := len(items)
 
-    TotalCost   float64
-    TotalPages  int
-    FailedPages int
+	// Build the catalog link table once for all pages
+	catalogTable := cat.BuildLinkTable()
+
+	// Build the link fixer once for all pages
+	linkFixer := output.NewLinkFixer(cat)
+
+	var done atomic.Int32
+	var failed atomic.Int32
+	var skipped atomic.Int32
+	var costMu sync.Mutex
+
+	eg, ctx := errgroup.WithContext(ctx)
+	sem := make(chan struct{}, concurrency)
+```
+
+> Source: internal/generator/content_phase.go#L21-L37
+
+Concurrency is governed by a buffered channel (`sem`) acting as a semaphore. The `concurrency` parameter is sourced from `ClaudeConfig.MaxConcurrent` (default: 3) or overridden via `GenerateOptions.Concurrency`.
+
+### Skip-Existing Logic
+
+When `skipExisting` is true (i.e., not a clean build), pages are checked against disk before generation:
+
+```go
+if skipExisting && g.Writer.PageExists(item) {
+	skipped.Add(1)
+	fmt.Printf("      [Skip] %s (exists)\n", item.Title)
+	return nil
 }
 ```
 
-> 來源：internal/generator/pipeline.go#L19-L31
+> Source: internal/generator/content_phase.go#L43-L47
 
-### ContentPromptData 資料模型
-
-`generateSinglePage()` 為每個頁面組裝以下 prompt 資料結構：
+`PageExists` in the writer checks that the file exists, is non-empty, and does not contain the failure placeholder marker `"This page failed to generate"`:
 
 ```go
-data := prompt.ContentPromptData{
-    RepositoryName:       g.Config.Project.Name,
-    Language:             g.Config.Output.Language,
-    LanguageName:         langName,
-    LanguageOverride:     g.Config.Output.NeedsLanguageOverride(),
-    LanguageOverrideName: langName,
-    CatalogPath:          item.Path,
-    CatalogTitle:         item.Title,
-    CatalogDirPath:       item.DirPath,
-    ProjectDir:           g.RootDir,
-    FileTree:             scanner.RenderTree(scan.Tree, 3),
-    CatalogTable:         catalogTable,
-    ExistingContent:      existingContent,
+func (w *Writer) PageExists(item catalog.FlatItem) bool {
+	path := filepath.Join(w.BaseDir, item.DirPath, "index.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return false
+	}
+	head := content
+	if len(head) > 500 {
+		head = head[:500]
+	}
+	if strings.Contains(head, "This page failed to generate") {
+		return false
+	}
+	return true
 }
 ```
 
-> 來源：internal/generator/content_phase.go#L91-L104
+> Source: internal/output/writer.go#L97-L117
 
-`ExistingContent` 在全新產生時為空字串；在增量更新場景（`updater.go`）中會填入既有頁面內容，供 Claude 進行修改而非全量重寫。
+### generateSinglePage — Per-Page Pipeline
 
-## 核心流程
+This private method handles the full lifecycle for generating a single documentation page.
 
-### 並行產生流程
+```go
+func (g *Generator) generateSinglePage(ctx context.Context, scan *scanner.ScanResult, item catalog.FlatItem, catalogTable string, linkFixer *output.LinkFixer, existingContent string) error {
+	langName := config.GetLangNativeName(g.Config.Output.Language)
+	data := prompt.ContentPromptData{
+		RepositoryName:       g.Config.Project.Name,
+		Language:             g.Config.Output.Language,
+		LanguageName:         langName,
+		LanguageOverride:     g.Config.Output.NeedsLanguageOverride(),
+		LanguageOverrideName: langName,
+		CatalogPath:          item.Path,
+		CatalogTitle:         item.Title,
+		CatalogDirPath:       item.DirPath,
+		ProjectDir:           g.RootDir,
+		FileTree:             scanner.RenderTree(scan.Tree, 3),
+		CatalogTable:         catalogTable,
+		ExistingContent:      existingContent,
+	}
+
+	rendered, err := g.Engine.RenderContent(data)
+	if err != nil {
+		return err
+	}
+```
+
+> Source: internal/generator/content_phase.go#L89-L107
+
+### ContentPromptData Structure
+
+The `ContentPromptData` struct carries all context needed by the `content.tmpl` prompt template:
+
+```go
+type ContentPromptData struct {
+	RepositoryName       string
+	Language             string
+	LanguageName         string
+	LanguageOverride     bool
+	LanguageOverrideName string
+	CatalogPath          string
+	CatalogTitle         string
+	CatalogDirPath       string // filesystem dir path of THIS item, e.g., "configuration/claude-config"
+	ProjectDir           string
+	FileTree             string
+	CatalogTable         string // formatted table of all catalog items with their dir paths
+	ExistingContent      string // existing page content for update context (empty for new pages)
+}
+```
+
+> Source: internal/prompt/engine.go#L54-L67
+
+The `ExistingContent` field is empty during initial generation but populated during incremental updates (see the `Update` method in `updater.go`), allowing Claude to preserve and update existing documentation.
+
+## Core Processes
+
+### Single Page Generation Flow
 
 ```mermaid
 sequenceDiagram
     participant GC as GenerateContent
-    participant EG as errgroup
-    participant SEM as semaphore
     participant GSP as generateSinglePage
-    participant CR as Runner.RunWithRetry
-    participant EDT as ExtractDocumentTag
-    participant LF as LinkFixer
-    participant W as Writer
+    participant PE as prompt.Engine
+    participant CR as claude.Runner
+    participant CP as claude.ExtractDocumentTag
+    participant LF as output.LinkFixer
+    participant OW as output.Writer
 
-    GC->>EG: 為每個 FlatItem 啟動 goroutine
-    loop 每個目錄項目
-        EG->>W: PageExists(item)
-        alt skipExisting && 頁面存在
-            EG->>EG: skipped.Add(1)
-        else 需要產生
-            EG->>SEM: sem <- struct{}{} (取得 token)
-            EG->>GSP: generateSinglePage(ctx, item)
-            GSP->>CR: RunWithRetry(ctx, RunOptions)
-            CR-->>GSP: RunResult{Content, CostUSD}
-            GSP->>EDT: ExtractDocumentTag(result.Content)
-            EDT-->>GSP: markdown 字串
-            GSP->>LF: FixLinks(content, item.DirPath)
-            LF-->>GSP: 修復後的 content
-            GSP->>W: WritePage(item, content)
-            EG->>SEM: <-sem (釋放 token)
+    GC->>GSP: item, catalogTable, linkFixer
+    GSP->>PE: RenderContent(ContentPromptData)
+    PE-->>GSP: rendered prompt string
+
+    loop Up to 2 attempts
+        GSP->>CR: RunWithRetry(prompt, workDir)
+        CR-->>GSP: RunResult (content, cost, duration)
+        GSP->>CP: ExtractDocumentTag(result.Content)
+        alt Extraction succeeds and content valid
+            CP-->>GSP: Markdown content
+        else Format error or invalid content
+            GSP->>GSP: Retry (if attempts remain)
         end
     end
-    GC->>GC: eg.Wait()
-    GC->>GC: 更新 TotalPages / FailedPages
+
+    GSP->>LF: FixLinks(content, item.DirPath)
+    LF-->>GSP: content with fixed links
+    GSP->>OW: WritePage(item, content)
 ```
 
-### 並行度控制
+### Retry and Validation Logic
 
-並行度以 semaphore channel 實作，大小由設定檔的 `claude.max_concurrent` 決定（可透過 CLI `--concurrency` 旗標覆蓋）：
+The phase applies a two-level retry strategy:
 
-```go
-sem := make(chan struct{}, concurrency)
-
-for _, item := range items {
-    item := item
-    eg.Go(func() error {
-        // ...skipExisting 檢查...
-
-        sem <- struct{}{}
-        defer func() { <-sem }()
-
-        // 執行 generateSinglePage
-    })
-}
-```
-
-> 來源：internal/generator/content_phase.go#L37-L73
-
-### 格式驗證與重試機制
-
-`generateSinglePage()` 內建最多 2 次嘗試（`maxAttempts = 2`），分別針對兩種格式錯誤情況重試：
+1. **Claude CLI retry** — `Runner.RunWithRetry` handles transient CLI failures with exponential backoff (configured via `max_retries`, default: 2).
+2. **Content format retry** — `generateSinglePage` retries up to 2 attempts when the response cannot be parsed or lacks a valid Markdown heading.
 
 ```go
 maxAttempts := 2
+var lastErr error
+
 for attempt := 1; attempt <= maxAttempts; attempt++ {
-    result, err := g.Runner.RunWithRetry(ctx, claude.RunOptions{...})
+	result, err := g.Runner.RunWithRetry(ctx, claude.RunOptions{
+		Prompt:  rendered,
+		WorkDir: g.RootDir,
+	})
+	if err != nil {
+		return err
+	}
 
-    // 嘗試從 <document> 標籤擷取內容
-    content, extractErr := claude.ExtractDocumentTag(result.Content)
-    if extractErr != nil {
-        if attempt < maxAttempts {
-            fmt.Printf(" 格式錯誤，重試中...\n      ")
-            continue
-        }
-        return lastErr
-    }
+	g.TotalCost += result.CostUSD
 
-    // 驗證是否有有效的 Markdown 標題
-    content = strings.TrimSpace(content)
-    if content == "" || !strings.HasPrefix(content, "#") {
-        if attempt < maxAttempts {
-            fmt.Printf(" 內容無效，重試中...\n      ")
-            continue
-        }
-        return lastErr
-    }
+	// Extract content from <document> tag
+	content, extractErr := claude.ExtractDocumentTag(result.Content)
+	if extractErr != nil {
+		lastErr = fmt.Errorf("failed to extract document content: %w", extractErr)
+		if attempt < maxAttempts {
+			fmt.Printf(" Format error, retrying...\n      ")
+			continue
+		}
+		fmt.Printf(" Failed (format error)\n")
+		return lastErr
+	}
 
-    // 後處理並寫入
-    content = linkFixer.FixLinks(content, item.DirPath)
-    return g.Writer.WritePage(item, content)
-}
+	content = strings.TrimSpace(content)
+	if content == "" || !strings.HasPrefix(content, "#") {
+		lastErr = fmt.Errorf("Claude did not output valid Markdown document (missing heading)")
+		if attempt < maxAttempts {
+			fmt.Printf(" Invalid content, retrying...\n      ")
+			continue
+		}
+		fmt.Printf(" Failed (invalid content)\n")
+		return lastErr
+	}
 ```
 
-> 來源：internal/generator/content_phase.go#L111-L156
+> Source: internal/generator/content_phase.go#L111-L146
 
-**驗證條件：**
-1. `claude.ExtractDocumentTag()` 必須能從回應中找到 `<document>...
+### Document Tag Extraction
+
+`ExtractDocumentTag` parses the `<document>...

@@ -1,258 +1,551 @@
-# 輸出結構說明
+# Output Structure
 
-selfmd 執行完成後，所有產生的文件、靜態瀏覽器資源及中繼資料均集中存放於輸出目錄（預設為 `.doc-build/`）。本頁說明該目錄的完整檔案結構與各檔案的用途。
+selfmd generates a self-contained documentation site from your source code, producing a directory of Markdown files, metadata, and a static viewer that can be opened directly in a browser.
 
-## 概述
+## Overview
 
-輸出目錄由 `output.Writer` 統一管理寫入。selfmd 的四個產生階段各司其職，依序將不同類型的檔案寫入輸出目錄：
+When selfmd runs the `generate` command, it writes all output into a single configurable directory (default: `.doc-build`). The output includes:
 
-- **目錄階段**：寫入 `_catalog.json`（目錄索引 JSON）
-- **內容階段**：寫入各章節的 `{dir}/index.md` 內容頁面
-- **索引與導航階段**：寫入 `index.md`、`_sidebar.md` 及分類索引頁面
-- **靜態瀏覽器**：寫入 `index.html`、`app.js`、`style.css`、`_data.js`、`_doc_meta.json`
-- **翻譯階段**（可選）：在 `{lang-code}/` 子目錄下寫入各語言的對應版本
+- **Markdown content pages** organized in a hierarchical directory structure mirroring the documentation catalog
+- **Metadata files** used for incremental updates and navigation
+- **A static HTML/JS/CSS viewer** that bundles all content for offline, serverless browsing
+- **Multi-language directories** when secondary languages are configured
 
-輸出目錄的根目錄路徑由 `selfmd.yaml` 中的 `output.dir` 欄位決定，預設值為 `.doc-build`。
+The output directory is designed to be served as a static site (e.g., via GitHub Pages) or browsed locally by opening `index.html`.
 
-## 架構
+## Architecture
 
 ```mermaid
 flowchart TD
-    A["selfmd generate"] --> B["output.Writer"]
-    B --> C["_catalog.json"]
-    B --> D["index.md（主頁）"]
-    B --> E["_sidebar.md（側欄導航）"]
-    B --> F["內容頁面目錄"]
-    B --> G["靜態瀏覽器資源"]
-    B --> H["增量更新中繼資料"]
+    Pipeline["Generator Pipeline"]
 
-    F --> F1["{section}/index.md"]
-    F --> F2["{section}/{subsection}/index.md"]
+    subgraph Output_Dir["Output Directory (.doc-build/)"]
+        direction TB
+        IndexMD["index.md"]
+        Sidebar["_sidebar.md"]
+        CatalogJSON["_catalog.json"]
+        LastCommit["_last_commit"]
+        NoJekyll[".nojekyll"]
+        DocMeta["_doc_meta.json"]
+        DataJS["_data.js"]
+        IndexHTML["index.html"]
+        AppJS["app.js"]
+        StyleCSS["style.css"]
 
-    G --> G1["index.html"]
-    G --> G2["app.js"]
-    G --> G3["style.css"]
-    G --> G4["_data.js（打包資料）"]
-    G --> G5["_doc_meta.json"]
+        subgraph Content_Pages["Content Pages"]
+            direction TB
+            OverviewDir["overview/index.md"]
+            CliDir["cli/cmd-generate/index.md"]
+            MorePages["...other pages..."]
+        end
 
-    H --> H1["_last_commit"]
+        subgraph Lang_Dir["Secondary Language (e.g., zh-TW/)"]
+            direction TB
+            LangCatalog["_catalog.json"]
+            LangSidebar["_sidebar.md"]
+            LangPages["overview/index.md, ..."]
+        end
+    end
 
-    I["selfmd translate"] --> J["語言子目錄"]
-    J --> J1["{lang-code}/_catalog.json"]
-    J --> J2["{lang-code}/index.md"]
-    J --> J3["{lang-code}/_sidebar.md"]
-    J --> J4["{lang-code}/{section}/index.md"]
+    Pipeline --> Output_Dir
+    Writer["output.Writer"] --> IndexMD
+    Writer --> Sidebar
+    Writer --> CatalogJSON
+    Writer --> LastCommit
+    Navigation["output.Navigation"] --> IndexMD
+    Navigation --> Sidebar
+    Viewer["output.WriteViewer"] --> IndexHTML
+    Viewer --> AppJS
+    Viewer --> StyleCSS
+    Viewer --> DocMeta
+    Viewer --> DataJS
 ```
 
-## 完整目錄結構
+## Directory Layout
 
-執行 `selfmd generate` 並加上翻譯後，典型的輸出目錄結構如下：
+A complete selfmd output directory looks like this:
 
 ```
-.doc-build/
-├── index.html          # 靜態文件瀏覽器入口頁面
-├── app.js              # 瀏覽器前端 JavaScript
-├── style.css           # 瀏覽器樣式表
-├── _data.js            # 所有 Markdown 內容的打包資料（供瀏覽器載入）
-├── _doc_meta.json      # 多語言中繼資訊
-├── _catalog.json       # 文件目錄結構（JSON，供增量更新使用）
-├── _last_commit        # 最後一次產生時的 Git commit hash
-├── index.md            # 文件主頁（目錄列表）
-├── _sidebar.md         # Docsify/瀏覽器側欄導航
-│
-├── {section}/
-│   └── index.md        # 章節內容頁面
-├── {section}/
-│   ├── index.md        # 分類索引頁面（有子章節時自動產生）
-│   └── {subsection}/
-│       └── index.md    # 子章節內容頁面
-│
-└── {lang-code}/        # 次要語言目錄（如 en-US/）
-    ├── _catalog.json   # 翻譯版目錄結構
-    ├── index.md        # 翻譯版主頁
-    ├── _sidebar.md     # 翻譯版側欄導航
-    └── {section}/
-        └── index.md    # 翻譯版內容頁面
+.doc-build/                          # Output root (configurable via output.dir)
+├── index.html                       # Static viewer HTML shell
+├── app.js                           # Client-side rendering application
+├── style.css                        # Viewer stylesheet
+├── _data.js                         # Bundled content for offline viewing
+├── _catalog.json                    # Catalog structure (for incremental updates)
+├── _doc_meta.json                   # Language metadata
+├── _sidebar.md                      # Navigation sidebar
+├── _last_commit                     # Git commit hash (for change detection)
+├── .nojekyll                        # Prevents GitHub Pages from ignoring _ files
+├── index.md                         # Main landing page
+├── overview/
+│   ├── index.md                     # Category index (auto-generated)
+│   ├── introduction/
+│   │   └── index.md                 # Content page
+│   ├── output-structure/
+│   │   └── index.md                 # Content page
+│   └── tech-stack/
+│       └── index.md                 # Content page
+├── cli/
+│   ├── index.md                     # Category index
+│   ├── cmd-generate/
+│   │   └── index.md
+│   └── ...
+└── zh-TW/                           # Secondary language directory
+    ├── _catalog.json                # Translated catalog
+    ├── _sidebar.md                  # Translated sidebar
+    ├── index.md                     # Translated landing page
+    ├── overview/
+    │   ├── index.md
+    │   ├── introduction/
+    │   │   └── index.md             # Translated content
+    │   └── ...
+    └── ...
 ```
 
-## 各類型檔案說明
+## Content Page Structure
 
-### 系統檔案（底線前綴）
-
-以底線（`_`）開頭的檔案為系統內部使用，不納入靜態瀏覽器的頁面路由，也不會顯示於文件目錄中。
-
-| 檔案 | 說明 |
-|------|------|
-| `_catalog.json` | 文件目錄的 JSON 序列化，供增量更新（`selfmd update`）重用，避免重新呼叫 Claude |
-| `_last_commit` | 紀錄最後一次產生時的 Git commit hash，供 `selfmd update` 判斷需更新的頁面 |
-| `_data.js` | 將所有 `.md` 檔案與目錄結構打包為單一 JavaScript 資料物件，供靜態瀏覽器在客戶端渲染 |
-| `_doc_meta.json` | 記錄主語言與所有次要語言的代碼及原生名稱，供語言切換功能使用 |
-| `_sidebar.md` | 導航側欄，由 `GenerateSidebar` 自動從目錄結構產生 |
-
-### 靜態瀏覽器資源
+Every documentation page is stored as an `index.md` file inside a directory path derived from the catalog. The `Writer.WritePage` method maps a catalog item's `DirPath` to the filesystem:
 
 ```go
-// viewer.go 將三個嵌入式靜態資源寫入輸出目錄
-if err := w.WriteFile("index.html", html); err != nil { ... }
-if err := w.WriteFile("app.js", viewerJS); err != nil { ... }
-if err := w.WriteFile("style.css", viewerCSS); err != nil { ... }
-```
-
-> 來源：`internal/output/viewer.go#L34-L44`
-
-`index.html` 是瀏覽器的入口頁面，其中 `{{PROJECT_NAME}}` 與 `{{LANG}}` 佔位符會在寫入時被替換為實際的專案名稱與語言代碼。
-
-### 內容頁面
-
-每個文件項目（`catalog.FlatItem`）的頁面均以 `index.md` 為檔名，存放於對應的目錄路徑下：
-
-```go
-// writer.go：WritePage 使用 FlatItem.DirPath 決定目錄位置
 func (w *Writer) WritePage(item catalog.FlatItem, content string) error {
-    dir := filepath.Join(w.BaseDir, item.DirPath)
-    path := filepath.Join(dir, "index.md")
-    // ...
+	dir := filepath.Join(w.BaseDir, item.DirPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+
+	path := filepath.Join(dir, "index.md")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", path, err)
+	}
+	return nil
 }
 ```
 
-> 來源：`internal/output/writer.go#L50-L61`
+> Source: internal/output/writer.go#L48-L60
 
-路徑對應規則：目錄結構中的 `DirPath`（如 `core-modules/scanner`）直接映射為檔案系統路徑，最終產生 `core-modules/scanner/index.md`。
+### Path Transformations
 
-### 主頁與分類索引
+The catalog system uses two path representations that map to the filesystem:
 
-- **`index.md`**（主頁）：由 `GenerateIndex` 產生，包含完整的文件目錄連結列表
-- **`{section}/index.md`**（分類索引）：當一個章節有子章節時，其 `index.md` 由 `GenerateCategoryIndex` 自動產生，列出直接子章節的連結
+| Representation | Example | Usage |
+|---|---|---|
+| Dot notation (`Path`) | `core-modules.generator.content-phase` | Internal catalog references |
+| Directory path (`DirPath`) | `core-modules/generator/content-phase` | Filesystem mapping |
+| File path | `{BaseDir}/core-modules/generator/content-phase/index.md` | Actual output file |
+
+The `flattenItem` function in the catalog module handles this conversion:
 
 ```go
-// index_phase.go：分類索引只為有子章節的項目產生
-for _, item := range items {
-    if !item.HasChildren {
-        continue
-    }
-    // ...
-    categoryContent := output.GenerateCategoryIndex(item, children, lang)
-    if err := g.Writer.WritePage(item, categoryContent); err != nil { ... }
+func flattenItem(items *[]FlatItem, item CatalogItem, parentPath string, depth int) {
+	path := item.Path
+	dirPath := strings.ReplaceAll(path, ".", "/")
+
+	if parentPath != "" {
+		parentDir := strings.ReplaceAll(parentPath, ".", "/")
+		if !strings.HasPrefix(dirPath, parentDir+"/") {
+			path = parentPath + "." + item.Path
+			dirPath = strings.ReplaceAll(path, ".", "/")
+		} else {
+			path = strings.ReplaceAll(dirPath, "/", ".")
+		}
+	}
+
+	*items = append(*items, FlatItem{
+		Title:       item.Title,
+		Path:        path,
+		DirPath:     dirPath,
+		Depth:       depth,
+		ParentPath:  parentPath,
+		HasChildren: len(item.Children) > 0,
+	})
+
+	for _, child := range item.Children {
+		flattenItem(items, child, path, depth+1)
+	}
 }
 ```
 
-> 來源：`internal/generator/index_phase.go#L34-L53`
+> Source: internal/catalog/catalog.go#L56-L88
 
-### `_data.js` 資料打包
+## Metadata Files
 
-靜態瀏覽器不依賴伺服器端路由，而是透過 `_data.js` 在客戶端載入所有內容。打包邏輯會掃描所有 `.md` 檔案，排除底線前綴檔案與次要語言目錄，將內容以 JSON 格式嵌入：
+### _catalog.json
+
+Stores the catalog tree structure as JSON. Used for incremental updates — when re-running generation without `clean`, the existing catalog is reloaded instead of regenerated.
 
 ```go
-// viewer.go：_data.js 的資料結構
+func (w *Writer) WriteCatalogJSON(cat *catalog.Catalog) error {
+	data, err := cat.ToJSON()
+	if err != nil {
+		return err
+	}
+	return w.WriteFile("_catalog.json", data)
+}
+```
+
+> Source: internal/output/writer.go#L76-L83
+
+The catalog JSON follows this schema:
+
+```go
+type Catalog struct {
+	Items []CatalogItem `json:"items"`
+}
+
+type CatalogItem struct {
+	Title    string        `json:"title"`
+	Path     string        `json:"path"`
+	Order    int           `json:"order"`
+	Children []CatalogItem `json:"children"`
+}
+```
+
+> Source: internal/catalog/catalog.go#L10-L21
+
+### _last_commit
+
+A plain text file containing the Git commit hash at the time of generation. The incremental update engine compares this with the current commit to detect changed files.
+
+```go
+func (w *Writer) SaveLastCommit(commit string) error {
+	return w.WriteFile("_last_commit", commit)
+}
+```
+
+> Source: internal/output/writer.go#L129-L132
+
+### _doc_meta.json
+
+Language metadata serialized as JSON. Contains the default language and all available languages with their native display names.
+
+```go
+type DocMeta struct {
+	DefaultLanguage    string     `json:"default_language"`
+	AvailableLanguages []LangInfo `json:"available_languages"`
+}
+
+type LangInfo struct {
+	Code       string `json:"code"`
+	NativeName string `json:"native_name"`
+	IsDefault  bool   `json:"is_default"`
+}
+```
+
+> Source: internal/output/writer.go#L12-L23
+
+### _sidebar.md
+
+A Markdown file containing the hierarchical navigation structure. Generated by `GenerateSidebar`:
+
+```go
+func GenerateSidebar(projectName string, cat *catalog.Catalog, lang string) string {
+	ui := getUIStrings(lang)
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("# %s\n\n", projectName))
+	sb.WriteString(fmt.Sprintf("- [%s](./index.md)\n", ui["home"]))
+
+	for _, item := range cat.Items {
+		writeSidebarItem(&sb, item, "", 0)
+	}
+
+	return sb.String()
+}
+```
+
+> Source: internal/output/navigation.go#L73-L86
+
+## Navigation Files
+
+### Main Index Page (index.md)
+
+The root `index.md` serves as the landing page. It lists the project name, description, and a full table of contents with links to every catalog item:
+
+```go
+func GenerateIndex(projectName, projectDesc string, cat *catalog.Catalog, lang string) string {
+	ui := getUIStrings(lang)
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("# %s %s\n\n", projectName, ui["techDocs"]))
+
+	if projectDesc != "" {
+		sb.WriteString(projectDesc + "\n\n")
+	}
+
+	sb.WriteString("---\n\n")
+	sb.WriteString(fmt.Sprintf("## %s\n\n", ui["catalog"]))
+
+	for _, item := range cat.Items {
+		writeIndexItem(&sb, item, "", 0)
+	}
+
+	sb.WriteString("\n---\n\n")
+	sb.WriteString(fmt.Sprintf("*%s*\n", ui["autoGenerated"]))
+
+	return sb.String()
+}
+```
+
+> Source: internal/output/navigation.go#L37-L59
+
+### Category Index Pages
+
+For catalog items that have children (e.g., "Core Modules"), a category index page is auto-generated listing the child pages:
+
+```go
+func GenerateCategoryIndex(item catalog.FlatItem, children []catalog.FlatItem, lang string) string {
+	ui := getUIStrings(lang)
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("# %s\n\n", item.Title))
+	sb.WriteString(ui["sectionContains"] + "\n\n")
+
+	for _, child := range children {
+		relPath := computeRelativePath(item.DirPath, child.DirPath)
+		sb.WriteString(fmt.Sprintf("- [%s](%s/index.md)\n", child.Title, relPath))
+	}
+
+	return sb.String()
+}
+```
+
+> Source: internal/output/navigation.go#L100-L114
+
+## Static Viewer
+
+The static viewer is a self-contained HTML/JS/CSS application that renders the documentation client-side. All assets are embedded in the Go binary via `//go:embed` directives:
+
+```go
+//go:embed viewer/index.html
+var viewerHTML string
+
+//go:embed viewer/app.js
+var viewerJS string
+
+//go:embed viewer/style.css
+var viewerCSS string
+```
+
+> Source: internal/output/viewer.go#L13-L20
+
+### _data.js Bundle
+
+The key to offline viewing is `_data.js`, which bundles all Markdown content, catalog structure, and language data into a single JavaScript file assigned to `window.DOC_DATA`:
+
+```go
+// Build data object
 data := map[string]interface{}{
-    "catalog": catalogObj,
-    "pages":   pages,
-}
-// 多語言時加入 meta 與各語言資料
-if docMeta != nil {
-    data["meta"] = docMeta
-    // ... 加入 languages 物件
+	"catalog": catalogObj,
+	"pages":   pages,
 }
 
+// Add language metadata and secondary language data
+if docMeta != nil {
+	data["meta"] = docMeta
+
+	languages := make(map[string]interface{})
+	for _, lang := range docMeta.AvailableLanguages {
+		if lang.IsDefault {
+			continue
+		}
+		// ... collect language-specific catalog and pages
+		languages[lang.Code] = langEntry
+	}
+
+	if len(languages) > 0 {
+		data["languages"] = languages
+	}
+}
+
+jsonBytes, err := json.Marshal(data)
+// ...
 content := "window.DOC_DATA = " + string(jsonBytes) + ";\n"
 return w.WriteFile("_data.js", content)
 ```
 
-> 來源：`internal/output/viewer.go#L128-L195`
+> Source: internal/output/viewer.go#L126-L194
 
-## 多語言目錄結構
+The resulting JavaScript object has this structure:
 
-啟用多語言翻譯後（透過 `selfmd translate`），每個次要語言會在輸出目錄下建立獨立的子目錄，結構與主語言完全相同：
-
-```
-.doc-build/
-├── （主語言內容，直接在根目錄下）
-└── en-US/              # 次要語言（以 en-US 為例）
-    ├── _catalog.json   # 翻譯版目錄
-    ├── index.md        # 翻譯版主頁
-    ├── _sidebar.md     # 翻譯版側欄
-    └── core-modules/
-        └── scanner/
-            └── index.md
-```
-
-`Writer.ForLanguage` 方法負責建立語言子目錄的寫入器：
-
-```go
-// writer.go：產生語言子目錄的 Writer
-func (w *Writer) ForLanguage(lang string) *Writer {
-    return &Writer{
-        BaseDir: filepath.Join(w.BaseDir, lang),
+```javascript
+window.DOC_DATA = {
+  "catalog": { "items": [/* catalog tree */] },
+  "pages": {
+    "index.md": "# Landing page content...",
+    "overview/introduction/index.md": "# Introduction...",
+    // ... all master-language pages
+  },
+  "meta": {
+    "default_language": "en-US",
+    "available_languages": [
+      { "code": "en-US", "native_name": "English", "is_default": true },
+      { "code": "zh-TW", "native_name": "繁體中文", "is_default": false }
+    ]
+  },
+  "languages": {
+    "zh-TW": {
+      "catalog": { "items": [/* translated catalog */] },
+      "pages": {
+        "index.md": "# 翻譯後的內容...",
+        // ... translated pages
+      }
     }
+  }
+};
+```
+
+The bundling process walks the output directory, collects all `.md` files, and skips files starting with `_` as well as files inside secondary language subdirectories (those are collected separately under the `languages` key).
+
+## Core Processes
+
+### Generation Pipeline Output Sequence
+
+```mermaid
+sequenceDiagram
+    participant P as Pipeline
+    participant W as Writer
+    participant N as Navigation
+    participant V as Viewer
+
+    Note over P: Phase 0 — Setup
+    P->>W: Clean() or EnsureDir()
+
+    Note over P: Phase 1 — Scan
+    P->>P: scanner.Scan()
+
+    Note over P: Phase 2 — Catalog
+    P->>W: WriteCatalogJSON() → _catalog.json
+
+    Note over P: Phase 3 — Content
+    loop For each catalog item
+        P->>W: WritePage(item, content) → {dirPath}/index.md
+    end
+
+    Note over P: Phase 4 — Navigation & Viewer
+    P->>N: GenerateIndex() → index.md
+    P->>N: GenerateSidebar() → _sidebar.md
+    P->>N: GenerateCategoryIndex() → {parent}/index.md
+    P->>V: WriteViewer() → index.html, app.js, style.css
+    V->>V: bundleData() → _data.js, _doc_meta.json
+    P->>W: WriteFile(".nojekyll")
+    P->>W: SaveLastCommit() → _last_commit
+```
+
+## Multi-Language Output
+
+When `secondary_languages` are configured, selfmd creates a subdirectory for each secondary language. The `Writer.ForLanguage` method returns a new writer scoped to that subdirectory:
+
+```go
+func (w *Writer) ForLanguage(lang string) *Writer {
+	return &Writer{
+		BaseDir: filepath.Join(w.BaseDir, lang),
+	}
 }
 ```
 
-> 來源：`internal/output/writer.go#L139-L144`
+> Source: internal/output/writer.go#L144-L149
 
-## 輸出目錄設定
+The master (default) language content lives directly in the output root. Each secondary language gets its own directory containing:
+- A translated `_catalog.json` with localized titles
+- A translated `_sidebar.md`
+- A translated `index.md` (landing page)
+- Translated category index pages
+- Translated content pages in the same directory hierarchy as the master language
 
-輸出目錄相關設定位於 `selfmd.yaml` 的 `output` 區段：
+## Link Fixing
+
+Generated content may contain broken or inconsistent internal links. The `LinkFixer` validates and corrects relative links before pages are written. It builds a multi-strategy index from the catalog for fuzzy matching:
 
 ```go
-// config.go：OutputConfig 結構
+func NewLinkFixer(cat *catalog.Catalog) *LinkFixer {
+	items := cat.Flatten()
+	dirPaths := make(map[string]bool)
+	pathIndex := make(map[string]string)
+
+	for _, item := range items {
+		dirPaths[item.DirPath] = true
+
+		// index by multiple keys for fuzzy matching
+		pathIndex[item.DirPath] = item.DirPath
+		pathIndex[item.Path] = item.DirPath                          // dot-notation
+		pathIndex[strings.ReplaceAll(item.Path, ".", "/")] = item.DirPath
+
+		// index by last segment (e.g., "scanner" → "core-modules/scanner")
+		parts := strings.Split(item.DirPath, "/")
+		lastSeg := parts[len(parts)-1]
+		if _, exists := pathIndex[lastSeg]; !exists {
+			pathIndex[lastSeg] = item.DirPath
+		}
+
+		// index by slug-like variations
+		pathIndex[strings.ToLower(item.DirPath)] = item.DirPath
+	}
+
+	return &LinkFixer{
+		allItems:  items,
+		dirPaths:  dirPaths,
+		pathIndex: pathIndex,
+	}
+}
+```
+
+> Source: internal/output/linkfixer.go#L18-L48
+
+## Configuration
+
+The output directory and language settings are controlled through `selfmd.yaml`:
+
+```go
 type OutputConfig struct {
-    Dir                 string   `yaml:"dir"`
-    Language            string   `yaml:"language"`
-    SecondaryLanguages  []string `yaml:"secondary_languages"`
-    CleanBeforeGenerate bool     `yaml:"clean_before_generate"`
+	Dir                 string   `yaml:"dir"`
+	Language            string   `yaml:"language"`
+	SecondaryLanguages  []string `yaml:"secondary_languages"`
+	CleanBeforeGenerate bool     `yaml:"clean_before_generate"`
 }
 ```
 
-> 來源：`internal/config/config.go#L31-L36`
+> Source: internal/config/config.go#L31-L36
 
-預設值：
+| Setting | Default | Description |
+|---|---|---|
+| `dir` | `.doc-build` | Output directory path |
+| `language` | `zh-TW` | Primary documentation language |
+| `secondary_languages` | `[]` | Additional languages to translate into |
+| `clean_before_generate` | `false` | Whether to wipe the output directory before generating |
 
-| 設定項 | 預設值 | 說明 |
-|--------|--------|------|
-| `output.dir` | `.doc-build` | 輸出目錄路徑 |
-| `output.language` | `zh-TW` | 主語言（內容直接在根目錄） |
-| `output.secondary_languages` | `[]`（空） | 次要語言列表，各自建立子目錄 |
-| `output.clean_before_generate` | `false` | 是否在產生前清除舊輸出 |
+### GitHub Pages Compatibility
 
-## 增量更新檔案
-
-`_catalog.json` 與 `_last_commit` 是增量更新機制的核心：
+selfmd writes a `.nojekyll` file to the output root, which tells GitHub Pages not to process files through Jekyll. This is necessary because several metadata files (e.g., `_catalog.json`, `_sidebar.md`) start with an underscore, which Jekyll would otherwise ignore.
 
 ```go
-// writer.go：保存增量更新所需的中繼資料
-func (w *Writer) WriteCatalogJSON(cat *catalog.Catalog) error {
-    data, err := cat.ToJSON()
-    return w.WriteFile("_catalog.json", data)
-}
-
-func (w *Writer) SaveLastCommit(commit string) error {
-    return w.WriteFile("_last_commit", commit)
+// Write .nojekyll to prevent GitHub Pages from ignoring files starting with _
+if err := g.Writer.WriteFile(".nojekyll", ""); err != nil {
+	g.Logger.Warn("failed to write .nojekyll", "error", err)
 }
 ```
 
-> 來源：`internal/output/writer.go#L77-L137`
+> Source: internal/generator/pipeline.go#L157-L160
 
-執行 `selfmd update` 時，系統會讀取這兩個檔案，比對目前的 Git commit 與上次產生時的 commit，僅重新產生受影響的頁面。
+## Related Links
 
-## 相關連結
+- [Introduction](../introduction/index.md)
+- [Tech Stack](../tech-stack/index.md)
+- [Generation Pipeline](../../architecture/pipeline/index.md)
+- [Output Writer](../../core-modules/output-writer/index.md)
+- [Static Viewer](../../core-modules/static-viewer/index.md)
+- [Catalog Manager](../../core-modules/catalog/index.md)
+- [Configuration Overview](../../configuration/config-overview/index.md)
+- [Translation Workflow](../../i18n/translation-workflow/index.md)
 
-- [整體流程與四階段管線](../../architecture/pipeline/index.md)
-- [輸出寫入與連結修復](../../core-modules/output-writer/index.md)
-- [靜態文件瀏覽器](../../core-modules/static-viewer/index.md)
-- [多語言支援](../../i18n/index.md)
-- [輸出與多語言設定](../../configuration/output-language/index.md)
-- [增量更新](../../core-modules/incremental-update/index.md)
+## Reference Files
 
-## 參考檔案
-
-| 檔案路徑 | 說明 |
-|----------|------|
-| `internal/output/writer.go` | `Writer` 結構與所有檔案寫入方法 |
-| `internal/output/viewer.go` | 靜態瀏覽器資源寫入與 `_data.js` 打包邏輯 |
-| `internal/output/navigation.go` | `index.md`、`_sidebar.md` 及分類索引頁面產生邏輯 |
-| `internal/output/linkfixer.go` | 連結修復器，確保頁面間相對連結正確 |
-| `internal/generator/pipeline.go` | 四階段管線整體協調，各類型輸出的產生順序 |
-| `internal/generator/index_phase.go` | 索引與導航階段實作 |
-| `internal/generator/translate_phase.go` | 翻譯階段與語言子目錄寫入邏輯 |
-| `internal/catalog/catalog.go` | `Catalog` 與 `FlatItem` 結構，`DirPath` 路徑映射規則 |
-| `internal/config/config.go` | `OutputConfig` 結構定義與預設值 |
+| File Path | Description |
+|-----------|-------------|
+| `internal/output/writer.go` | Output writer — file/page writing, catalog persistence, language scoping |
+| `internal/output/navigation.go` | Navigation generation — index, sidebar, and category index pages |
+| `internal/output/viewer.go` | Static viewer generation and content bundling into `_data.js` |
+| `internal/output/linkfixer.go` | Link validation and fuzzy-match fixing for internal Markdown links |
+| `internal/catalog/catalog.go` | Catalog data structures, JSON parsing, and path flattening |
+| `internal/config/config.go` | Configuration structs including `OutputConfig` and language definitions |
+| `internal/generator/pipeline.go` | Four-phase generation pipeline orchestrating all output |
+| `selfmd.yaml` | Project configuration file showing output settings in practice |

@@ -1,7 +1,7 @@
-# 概述
+# Overview
 
 This section contains the following:
 
-- [專案介紹與功能特色](introduction/index.md)
-- [技術棧與相依套件](tech-stack/index.md)
-- [輸出結構說明](output-structure/index.md)
+- [Introduction](introduction/index.md)
+- [Output Structure](output-structure/index.md)
+- [Tech Stack](tech-stack/index.md)

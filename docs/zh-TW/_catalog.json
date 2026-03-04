@@ -1,0 +1,259 @@
+{
+  "items": [
+    {
+      "title": "總覽",
+      "path": "overview",
+      "order": 0,
+      "children": [
+        {
+          "title": "簡介",
+          "path": "introduction",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "輸出結構",
+          "path": "output-structure",
+          "order": 1,
+          "children": []
+        },
+        {
+          "title": "技術堆疊",
+          "path": "tech-stack",
+          "order": 2,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "快速開始",
+      "path": "getting-started",
+      "order": 1,
+      "children": [
+        {
+          "title": "安裝",
+          "path": "installation",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "初始化",
+          "path": "init",
+          "order": 1,
+          "children": []
+        },
+        {
+          "title": "首次執行",
+          "path": "first-run",
+          "order": 2,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "CLI 命令",
+      "path": "cli",
+      "order": 2,
+      "children": [
+        {
+          "title": "generate 指令",
+          "path": "cmd-generate",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "init 指令",
+          "path": "cmd-init",
+          "order": 1,
+          "children": []
+        },
+        {
+          "title": "update 指令",
+          "path": "cmd-update",
+          "order": 2,
+          "children": []
+        },
+        {
+          "title": "translate 指令",
+          "path": "cmd-translate",
+          "order": 3,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "設定",
+      "path": "configuration",
+      "order": 3,
+      "children": [
+        {
+          "title": "設定總覽",
+          "path": "config-overview",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "專案目標",
+          "path": "project-targets",
+          "order": 1,
+          "children": []
+        },
+        {
+          "title": "輸出語言",
+          "path": "output-language",
+          "order": 2,
+          "children": []
+        },
+        {
+          "title": "Claude 設定",
+          "path": "claude-config",
+          "order": 3,
+          "children": []
+        },
+        {
+          "title": "Git 整合設定",
+          "path": "git-config",
+          "order": 4,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "系統架構",
+      "path": "architecture",
+      "order": 4,
+      "children": [
+        {
+          "title": "生成管線",
+          "path": "pipeline",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "模組依賴關係",
+          "path": "module-dependencies",
+          "order": 1,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "核心模組",
+      "path": "core-modules",
+      "order": 5,
+      "children": [
+        {
+          "title": "專案掃描器",
+          "path": "scanner",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "目錄管理器",
+          "path": "catalog",
+          "order": 1,
+          "children": []
+        },
+        {
+          "title": "Claude Runner",
+          "path": "claude-runner",
+          "order": 2,
+          "children": []
+        },
+        {
+          "title": "提示引擎",
+          "path": "prompt-engine",
+          "order": 3,
+          "children": []
+        },
+        {
+          "title": "文件產生器",
+          "path": "generator",
+          "order": 4,
+          "children": [
+            {
+              "title": "目錄階段",
+              "path": "catalog-phase",
+              "order": 0,
+              "children": []
+            },
+            {
+              "title": "內容階段",
+              "path": "content-phase",
+              "order": 1,
+              "children": []
+            },
+            {
+              "title": "索引階段",
+              "path": "index-phase",
+              "order": 2,
+              "children": []
+            },
+            {
+              "title": "翻譯階段",
+              "path": "translate-phase",
+              "order": 3,
+              "children": []
+            }
+          ]
+        },
+        {
+          "title": "增量更新引擎",
+          "path": "incremental-update",
+          "order": 5,
+          "children": []
+        },
+        {
+          "title": "輸出寫入器",
+          "path": "output-writer",
+          "order": 6,
+          "children": []
+        },
+        {
+          "title": "靜態檢視器",
+          "path": "static-viewer",
+          "order": 7,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "Git 整合",
+      "path": "git-integration",
+      "order": 6,
+      "children": [
+        {
+          "title": "變更偵測",
+          "path": "change-detection",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "受影響頁面匹配",
+          "path": "affected-pages",
+          "order": 1,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "國際化",
+      "path": "i18n",
+      "order": 7,
+      "children": [
+        {
+          "title": "支援語言",
+          "path": "supported-languages",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "翻譯工作流程",
+          "path": "translation-workflow",
+          "order": 1,
+          "children": []
+        }
+      ]
+    }
+  ]
+}

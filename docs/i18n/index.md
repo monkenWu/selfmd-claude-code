@@ -1,6 +1,6 @@
-# 多語言支援
+# Internationalization
 
 This section contains the following:
 
-- [支援的語言與模板](supported-languages/index.md)
-- [翻譯工作流程](translation-workflow/index.md)
+- [Supported Languages](supported-languages/index.md)
+- [Translation Workflow](translation-workflow/index.md)

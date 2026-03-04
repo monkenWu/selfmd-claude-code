@@ -1,79 +1,45 @@
-# Claude CLI 執行器
+# Claude Runner
 
-`claude` 套件封裝了對 Claude CLI 子行程的所有呼叫，提供統一的執行介面、重試邏輯、超時控制以及回應解析功能。
+The Claude Runner (`internal/claude`) is the subprocess management layer that handles all interactions with the Claude CLI. It encapsulates command construction, execution, timeout management, retry logic, and response parsing.
 
-## 概述
+## Overview
 
-Claude CLI 執行器（`internal/claude`）是 selfmd 與 AI 模型互動的唯一入口。它負責：
+The Claude Runner serves as the bridge between selfmd's documentation generation pipeline and the external `claude` CLI tool. Rather than using an HTTP API, selfmd invokes Claude Code as a local subprocess, piping prompts via stdin and receiving structured JSON responses on stdout.
 
-- **子行程管理**：透過 `os/exec` 啟動 `claude -p --output-format json` 子行程，並以 stdin 傳入 Prompt
-- **參數組裝**：根據 `ClaudeConfig` 與每次呼叫的 `RunOptions` 動態組裝 CLI 引數
-- **安全限制**：強制禁止 Claude 使用 `Write`、`Edit` 工具，防止子行程修改本地檔案
-- **重試機制**：在呼叫失敗或 Claude 本身回報錯誤時，以線性退避（linear backoff）自動重試
-- **回應解析**：將 JSON 格式的 CLI 輸出轉換為 Go 結構體，並提供多種輔助函式從 Claude 回應中擷取特定格式內容
+Key responsibilities:
 
-整個產生管線（`internal/generator`）的所有階段皆共用同一個 `Runner` 實例，由 `Generator` 結構體持有並傳遞。
+- **CLI invocation** — Constructs and executes `claude -p --output-format json` commands with configurable model, tool restrictions, and timeout settings
+- **Retry with backoff** — Automatically retries failed invocations with linear backoff (5s × attempt number)
+- **Response parsing** — Deserializes Claude's JSON output into typed Go structs
+- **Content extraction** — Provides utilities to extract JSON blocks, Markdown content, and `<document>` tag content from Claude's free-form text responses
+- **Availability checking** — Verifies the `claude` CLI is installed before running any pipeline phase
 
-## 架構
-
-### 模組結構
+## Architecture
 
 ```mermaid
 flowchart TD
-    subgraph claude_pkg["package claude"]
-        Runner["Runner\n執行器"]
-        RunOptions["RunOptions\n執行選項"]
-        RunResult["RunResult\n執行結果"]
-        CLIResponse["CLIResponse\nCLI JSON 回應"]
-        ParseResponse["ParseResponse()"]
-        ExtractJSONBlock["ExtractJSONBlock()"]
-        ExtractMarkdown["ExtractMarkdown()"]
-        ExtractDocumentTag["ExtractDocumentTag()"]
-        cleanBoilerplate["cleanBoilerplate()（私有）"]
-    end
+    Generator["generator.Generator"] -->|"RunWithRetry(ctx, RunOptions)"| Runner["claude.Runner"]
+    Runner -->|"exec.CommandContext"| CLI["claude CLI subprocess"]
+    CLI -->|"JSON stdout"| ParseResponse["claude.ParseResponse"]
+    ParseResponse --> RunResult["claude.RunResult"]
 
-    ClaudeConfig["config.ClaudeConfig\n設定結構"]
-    ClaudeCLI["claude CLI\n子行程"]
-    GeneratorPkg["generator 套件\n各產生階段"]
+    RunResult -->|"result.Content"| ExtractJSON["claude.ExtractJSONBlock"]
+    RunResult -->|"result.Content"| ExtractDoc["claude.ExtractDocumentTag"]
+    RunResult -->|"result.Content"| ExtractMD["claude.ExtractMarkdown"]
 
-    ClaudeConfig -->|"注入"| Runner
-    GeneratorPkg -->|"呼叫 RunWithRetry()"| Runner
-    Runner -->|"組裝引數"| RunOptions
-    Runner -->|"exec.CommandContext"| ClaudeCLI
-    ClaudeCLI -->|"stdout JSON"| ParseResponse
-    ParseResponse -->|"填入"| RunResult
-    RunResult -->|"回傳給"| GeneratorPkg
-    GeneratorPkg -->|"ExtractJSONBlock()"| ExtractJSONBlock
-    GeneratorPkg -->|"ExtractDocumentTag()"| ExtractDocumentTag
-    ExtractMarkdown -->|"呼叫"| cleanBoilerplate
-    CLIResponse -->|"json.Unmarshal"| ParseResponse
+    Config["config.ClaudeConfig"] -->|"model, timeout, tools, retries"| Runner
+
+    style Runner fill:#f9f,stroke:#333,stroke-width:2px
+    style CLI fill:#bbf,stroke:#333
 ```
 
-### 依賴關係
+## Core Types
 
-```mermaid
-flowchart LR
-    catalog_phase["catalog_phase\n目錄產生階段"]
-    content_phase["content_phase\n內容產生階段"]
-    translate_phase["translate_phase\n翻譯階段"]
-    updater["updater\n增量更新"]
+### RunOptions
 
-    Runner["claude.Runner"]
-
-    catalog_phase -->|"RunWithRetry + ExtractJSONBlock"| Runner
-    content_phase -->|"RunWithRetry + ExtractDocumentTag"| Runner
-    translate_phase -->|"RunWithRetry + ExtractDocumentTag"| Runner
-    updater -->|"RunWithRetry + ExtractJSONBlock"| Runner
-```
-
-## 核心型別
-
-### RunOptions — 執行選項
-
-每次呼叫 Claude CLI 時傳入的參數集合：
+`RunOptions` configures a single Claude CLI invocation. The caller specifies the prompt, working directory, and optional overrides for model, tools, and timeout.
 
 ```go
-// RunOptions configures a single Claude CLI invocation.
 type RunOptions struct {
 	Prompt       string
 	WorkDir      string        // CWD for the claude process
@@ -84,21 +50,13 @@ type RunOptions struct {
 }
 ```
 
-> 來源：internal/claude/types.go#L6-L13
+> Source: internal/claude/types.go#L6-L13
 
-| 欄位 | 說明 |
-|------|------|
-| `Prompt` | 傳入 Claude stdin 的完整提示文字 |
-| `WorkDir` | 子行程的工作目錄，用於 Claude 存取專案檔案 |
-| `AllowedTools` | 覆蓋設定中的 `allowed_tools`，若為空則使用設定值 |
-| `Model` | 覆蓋設定中的 `model`，若為空則使用設定值 |
-| `Timeout` | 覆蓋設定中的 `timeout_seconds`，若為零則使用設定值 |
-| `ExtraArgs` | 附加在設定 `extra_args` 之後的額外 CLI 引數 |
+### RunResult
 
-### RunResult — 執行結果
+`RunResult` holds the parsed output from a Claude CLI invocation, including the text content, error status, execution time, cost, and session ID.
 
 ```go
-// RunResult holds the parsed result from a Claude CLI invocation.
 type RunResult struct {
 	Content    string  // the text result from Claude
 	IsError    bool    // whether Claude reported an error
@@ -108,14 +66,13 @@ type RunResult struct {
 }
 ```
 
-> 來源：internal/claude/types.go#L16-L23
+> Source: internal/claude/types.go#L15-L22
 
-### CLIResponse — CLI JSON 原始回應
+### CLIResponse
 
-對應 `claude -p --output-format json` 輸出的 JSON 結構：
+`CLIResponse` maps directly to the JSON structure returned by `claude -p --output-format json`.
 
 ```go
-// CLIResponse represents the JSON response from `claude -p --output-format json`.
 type CLIResponse struct {
 	Type       string  `json:"type"`
 	Subtype    string  `json:"subtype"`
@@ -127,58 +84,97 @@ type CLIResponse struct {
 }
 ```
 
-> 來源：internal/claude/types.go#L25-L33
+> Source: internal/claude/types.go#L24-L33
 
-## 執行方法
+### ClaudeConfig
 
-### Run() — 單次呼叫
-
-`Run()` 執行一次 Claude CLI 呼叫，組裝引數、建立子行程、傳遞 Prompt、等待結果並解析回應：
+The `Runner` is initialized with a `config.ClaudeConfig` struct that provides default values for model, concurrency, timeout, retries, allowed tools, and extra arguments.
 
 ```go
-// Run executes a single Claude CLI invocation.
-func (r *Runner) Run(ctx context.Context, opts RunOptions) (*RunResult, error) {
-	// build command args
-	args := []string{
-		"-p",
-		"--output-format", "json",
-	}
-
-	model := opts.Model
-	if model == "" {
-		model = r.config.Model
-	}
-	if model != "" {
-		args = append(args, "--model", model)
-	}
-
-	// ...（工具清單組裝省略）
-
-	// Explicitly block Write/Edit to prevent content from being lost in denied tool calls
-	args = append(args, "--disallowedTools", "Write", "--disallowedTools", "Edit")
-
-	// ...（超時、子行程建立省略）
-
-	// pipe prompt via stdin
-	cmd.Stdin = strings.NewReader(opts.Prompt)
+type ClaudeConfig struct {
+	Model          string   `yaml:"model"`
+	MaxConcurrent  int      `yaml:"max_concurrent"`
+	TimeoutSeconds int      `yaml:"timeout_seconds"`
+	MaxRetries     int      `yaml:"max_retries"`
+	AllowedTools   []string `yaml:"allowed_tools"`
+	ExtraArgs      []string `yaml:"extra_args"`
+}
 ```
 
-> 來源：internal/claude/runner.go#L30-L75
+> Source: internal/config/config.go#L82-L89
 
-**引數組裝優先順序：**
-
-1. 固定引數：`-p`、`--output-format json`
-2. Model：`opts.Model` > `config.Model`（均為空則不指定）
-3. AllowedTools：`opts.AllowedTools` > `config.AllowedTools`
-4. 強制禁用：`--disallowedTools Write --disallowedTools Edit`
-5. 附加引數：`config.ExtraArgs` + `opts.ExtraArgs`
-
-### RunWithRetry() — 帶重試呼叫
-
-`RunWithRetry()` 在 `Run()` 基礎上加入線性退避重試。重試次數由 `config.MaxRetries` 控制，每次重試等待 `attempt * 5` 秒：
+Default values:
 
 ```go
-// RunWithRetry executes a Claude CLI invocation with retry logic.
+Claude: ClaudeConfig{
+	Model:          "sonnet",
+	MaxConcurrent:  3,
+	TimeoutSeconds: 1800,
+	MaxRetries:     2,
+	AllowedTools:   []string{"Read", "Glob", "Grep"},
+	ExtraArgs:      []string{},
+},
+```
+
+> Source: internal/config/config.go#L116-L123
+
+## Core Processes
+
+### Invocation Lifecycle
+
+The following sequence shows how a single Claude invocation flows from the generator through the runner to the CLI and back:
+
+```mermaid
+sequenceDiagram
+    participant Gen as generator.Generator
+    participant Runner as claude.Runner
+    participant CLI as claude CLI
+    participant Parser as claude.ParseResponse
+
+    Gen->>Runner: RunWithRetry(ctx, RunOptions)
+    loop attempt 0..maxRetries
+        Runner->>Runner: Build CLI args (-p, --output-format json, --model, --allowedTools, --disallowedTools)
+        Runner->>CLI: exec.CommandContext("claude", args...)
+        Runner-->>CLI: pipe prompt via stdin
+        CLI-->>Runner: JSON on stdout
+        Runner->>Parser: ParseResponse(stdout)
+        Parser-->>Runner: RunResult
+        alt success and !IsError
+            Runner-->>Gen: return RunResult
+        else failure
+            Runner->>Runner: backoff (attempt × 5s)
+        end
+    end
+    Runner-->>Gen: error (all attempts failed)
+```
+
+### Command Construction
+
+The `Run` method builds the CLI arguments in a specific order:
+
+1. Base flags: `-p` (pipe mode) and `--output-format json`
+2. Model: from `RunOptions.Model`, falling back to `config.ClaudeConfig.Model`
+3. Allowed tools: from `RunOptions.AllowedTools`, falling back to `config.ClaudeConfig.AllowedTools`
+4. Disallowed tools: `Write` and `Edit` are always blocked to prevent Claude from losing content in denied tool calls
+5. Extra args: from both the config and per-invocation options
+
+```go
+args := []string{
+	"-p",
+	"--output-format", "json",
+}
+// ...
+// Explicitly block Write/Edit to prevent content from being lost in denied tool calls
+args = append(args, "--disallowedTools", "Write", "--disallowedTools", "Edit")
+```
+
+> Source: internal/claude/runner.go#L32-L56
+
+### Retry Logic
+
+`RunWithRetry` wraps `Run` with configurable retry behavior. Retries occur when the CLI call returns an error or when `RunResult.IsError` is `true`. The backoff is linear: `attempt × 5 seconds`.
+
+```go
 func (r *Runner) RunWithRetry(ctx context.Context, opts RunOptions) (*RunResult, error) {
 	maxRetries := r.config.MaxRetries
 	var lastErr error
@@ -186,7 +182,7 @@ func (r *Runner) RunWithRetry(ctx context.Context, opts RunOptions) (*RunResult,
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(attempt) * 5 * time.Second
-			r.logger.Info("重試中", "attempt", attempt+1, "backoff", backoff)
+			r.logger.Info("retrying", "attempt", attempt+1, "backoff", backoff)
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -200,44 +196,40 @@ func (r *Runner) RunWithRetry(ctx context.Context, opts RunOptions) (*RunResult,
 		}
 		// ...
 	}
-	return nil, fmt.Errorf("所有 %d 次嘗試均失敗: %w", maxRetries+1, lastErr)
+
+	return nil, fmt.Errorf("all %d attempts failed: %w", maxRetries+1, lastErr)
 }
 ```
 
-> 來源：internal/claude/runner.go#L113-L143
+> Source: internal/claude/runner.go#L112-L143
 
-**失敗條件（任一滿足即觸發重試）：**
-- `Run()` 回傳 `err != nil`（子行程錯誤、超時等）
-- `result.IsError == true`（Claude 自身回報錯誤）
+### Timeout Handling
 
-### CheckAvailable() — 環境檢查
+Each invocation is wrapped with `context.WithTimeout`. If the deadline is exceeded, the runner returns a descriptive timeout error rather than a generic context error.
 
 ```go
-// CheckAvailable verifies that the claude CLI is installed and accessible.
-func CheckAvailable() error {
-	_, err := exec.LookPath("claude")
-	if err != nil {
-		return fmt.Errorf("找不到 claude CLI。請先安裝 Claude Code：https://docs.anthropic.com/en/docs/claude-code")
-	}
-	return nil
+timeout := opts.Timeout
+if timeout == 0 {
+	timeout = time.Duration(r.config.TimeoutSeconds) * time.Second
 }
+
+ctx, cancel := context.WithTimeout(ctx, timeout)
+defer cancel()
 ```
 
-> 來源：internal/claude/runner.go#L146-L152
+> Source: internal/claude/runner.go#L61-L67
 
-## 回應解析函式
+## Response Parsing & Content Extraction
 
-`parser.go` 提供四個公開函式，供產生管線各階段從 Claude 回應中擷取所需格式的內容。
+### ParseResponse
 
-### ParseResponse() — 解析 CLI JSON
-
-將 `claude -p --output-format json` 的原始 JSON 輸出轉換為 `RunResult`：
+Deserializes the raw JSON output from the Claude CLI into a `RunResult` struct.
 
 ```go
 func ParseResponse(data []byte) (*RunResult, error) {
 	var resp CLIResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("JSON 解析失敗: %w", err)
+		return nil, fmt.Errorf("JSON parse failed: %w", err)
 	}
 
 	return &RunResult{
@@ -250,35 +242,55 @@ func ParseResponse(data []byte) (*RunResult, error) {
 }
 ```
 
-> 來源：internal/claude/parser.go#L11-L24
+> Source: internal/claude/parser.go#L12-L25
 
-### ExtractJSONBlock() — 擷取 JSON 區塊
+### ExtractJSONBlock
 
-從 Claude 的 Markdown 回應中擷取第一個 JSON 物件，依序嘗試三種策略：
+Extracts JSON from Claude's response text. Used by the catalog phase and update engine to parse structured JSON output. The function tries three strategies in order:
+
+1. Fenced ` ```json ... ``` ` code blocks
+2. Fenced ` ``` ... ``` ` code blocks (without language tag)
+3. Raw JSON object detection via brace-depth tracking
 
 ```go
 func ExtractJSONBlock(text string) (string, error) {
 	// try fenced code block first
 	re := regexp.MustCompile("(?s)```json\\s*\n(.*?)```")
-	// ...
+	matches := re.FindStringSubmatch(text)
+	if len(matches) > 1 {
+		return strings.TrimSpace(matches[1]), nil
+	}
+
 	// try without language tag
 	re = regexp.MustCompile("(?s)```\\s*\n(\\{.*?\\})\\s*```")
-	// ...
+	matches = re.FindStringSubmatch(text)
+	if len(matches) > 1 {
+		return strings.TrimSpace(matches[1]), nil
+	}
+
 	// try to find raw JSON object
 	start := strings.Index(text, "{")
-	// ...
+	if start >= 0 {
+		depth := 0
+		for i := start; i < len(text); i++ {
+			switch text[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					return text[start : i+1], nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("%s", "failed to extract JSON block from response")
 }
 ```
 
-> 來源：internal/claude/parser.go#L28-L61
+> Source: internal/claude/parser.go#L27-L62
 
-**三階段擷取策略：**
-1. ` ```json ... ``` ` 圍欄程式碼區塊
-2. ` ``` ... ``` ` 不含語言標籤的圍欄區塊（內容為 JSON 物件）
-3. 直接從原始文字中尋找 `{...}` 配對的 JSON 物件
+### ExtractDocumentTag
 
-**使用場景**：`catalog_phase`（目錄產生）與 `updater`（增量更新判斷）呼叫此函式解析 Claude 回傳的 JSON 結果。
-
-### ExtractDocumentTag() — 擷取 `<document>` 標籤
-
-從 Claude 回應中擷取 `<document>...
+Extracts content from `<document>...

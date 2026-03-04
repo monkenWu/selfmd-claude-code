@@ -1,263 +1,445 @@
-# selfmd.yaml 結構總覽
+# Configuration Overview
 
-`selfmd.yaml` 是 selfmd 的核心設定檔，包含五個頂層區段，控制從專案掃描到 Claude CLI 呼叫的所有行為。
+selfmd uses a single YAML configuration file (`selfmd.yaml`) to control all aspects of documentation generation, from project metadata to Claude AI settings and git integration.
 
-## 概述
+## Overview
 
-`selfmd.yaml` 採用 YAML 格式，由 `internal/config/config.go` 定義的 `Config` 結構解析。執行任何 selfmd 指令前，系統會先載入並驗證此設定檔。
+The `selfmd.yaml` file is the central configuration point for the selfmd tool. It is loaded at the start of every command (`generate`, `update`, `translate`) and governs:
 
-設定檔的五個頂層區段各自負責不同的功能面向：
+- **Project identity** — name, type, and description
+- **File targeting** — which source files to include or exclude from documentation
+- **Output settings** — output directory, primary and secondary languages, and cleanup behavior
+- **Claude AI parameters** — model selection, concurrency, timeouts, retries, and tool permissions
+- **Git integration** — whether to enable git-based incremental updates and which branch to compare against
 
-| 區段 | Go 型別 | 功能說明 |
-|------|---------|---------|
-| `project` | `ProjectConfig` | 專案基本資訊（名稱、類型、描述） |
-| `targets` | `TargetsConfig` | 掃描目標路徑（包含、排除、入口點） |
-| `output` | `OutputConfig` | 輸出目錄與多語言設定 |
-| `claude` | `ClaudeConfig` | Claude CLI 執行參數 |
-| `git` | `GitConfig` | Git 整合與增量更新設定 |
+The configuration file is created by `selfmd init` and can be edited manually afterward. All fields have sensible defaults defined in the `DefaultConfig()` function, so only values that differ from the defaults need to be specified.
 
-執行 `selfmd init` 時，系統會自動偵測專案類型並套用預設值，產生完整的 `selfmd.yaml` 範本。設定檔路徑預設為 `selfmd.yaml`，可透過 `--config` 旗標覆蓋。
-
-## 架構
+## Architecture
 
 ```mermaid
-graph TD
-    YAML["selfmd.yaml"]
+flowchart TD
+    subgraph Commands
+        CmdInit["cmd/init.go<br/>selfmd init"]
+        CmdGenerate["cmd/generate.go<br/>selfmd generate"]
+        CmdUpdate["cmd/update.go<br/>selfmd update"]
+        CmdTranslate["cmd/translate.go<br/>selfmd translate"]
+    end
 
-    YAML --> P["project\n（ProjectConfig）"]
-    YAML --> T["targets\n（TargetsConfig）"]
-    YAML --> O["output\n（OutputConfig）"]
-    YAML --> C["claude\n（ClaudeConfig）"]
-    YAML --> G["git\n（GitConfig）"]
+    subgraph ConfigPackage["internal/config"]
+        ConfigStruct["Config"]
+        ProjectConfig["ProjectConfig"]
+        TargetsConfig["TargetsConfig"]
+        OutputConfig["OutputConfig"]
+        ClaudeConfig["ClaudeConfig"]
+        GitConfig["GitConfig"]
+    end
 
-    P --> P1["name"]
-    P --> P2["type"]
-    P --> P3["description"]
+    subgraph Consumers
+        Scanner["scanner.Scan()"]
+        Generator["generator.NewGenerator()"]
+        PromptEngine["prompt.NewEngine()"]
+        ClaudeRunner["claude.NewRunner()"]
+        OutputWriter["output.NewWriter()"]
+        GitModule["git.FilterChangedFiles()"]
+    end
 
-    T --> T1["include"]
-    T --> T2["exclude"]
-    T --> T3["entry_points"]
+    CmdInit -->|"DefaultConfig() + Save()"| ConfigStruct
+    CmdGenerate -->|"config.Load()"| ConfigStruct
+    CmdUpdate -->|"config.Load()"| ConfigStruct
+    CmdTranslate -->|"config.Load()"| ConfigStruct
 
-    O --> O1["dir"]
-    O --> O2["language"]
-    O --> O3["secondary_languages"]
-    O --> O4["clean_before_generate"]
+    ConfigStruct --> ProjectConfig
+    ConfigStruct --> TargetsConfig
+    ConfigStruct --> OutputConfig
+    ConfigStruct --> ClaudeConfig
+    ConfigStruct --> GitConfig
 
-    C --> C1["model"]
-    C --> C2["max_concurrent"]
-    C --> C3["timeout_seconds"]
-    C --> C4["max_retries"]
-    C --> C5["allowed_tools"]
-    C --> C6["extra_args"]
-
-    G --> G1["enabled"]
-    G --> G2["base_branch"]
+    TargetsConfig --> Scanner
+    OutputConfig --> Generator
+    OutputConfig --> PromptEngine
+    ClaudeConfig --> ClaudeRunner
+    OutputConfig --> OutputWriter
+    GitConfig --> GitModule
+    TargetsConfig --> GitModule
 ```
 
-## 完整結構說明
+## Configuration Structure
 
-### `project` — 專案基本資訊
+The `Config` struct is defined in `internal/config/config.go` and consists of five top-level sections:
 
-```yaml
-project:
-  name: myproject         # 專案名稱，用於文件標題與瀏覽器頁籤
-  type: backend           # 專案類型：backend / frontend / fullstack / library
-  description: ""         # 專案描述（可選）
+```go
+type Config struct {
+	Project ProjectConfig `yaml:"project"`
+	Targets TargetsConfig `yaml:"targets"`
+	Output  OutputConfig  `yaml:"output"`
+	Claude  ClaudeConfig  `yaml:"claude"`
+	Git     GitConfig     `yaml:"git"`
+}
 ```
 
-> 來源：`internal/config/config.go#L19-L23`
+> Source: internal/config/config.go#L11-L17
 
-`type` 欄位影響 Claude 產生文件時的上下文描述，`selfmd init` 會自動偵測（根據 `go.mod`、`package.json` 等標誌性檔案）。
+### `project` — Project Metadata
 
----
+Describes the project being documented.
 
-### `targets` — 掃描目標設定
-
-```yaml
-targets:
-  include:
-    - src/**
-    - pkg/**
-    - cmd/**
-    - internal/**
-    - lib/**
-    - app/**
-  exclude:
-    - vendor/**
-    - node_modules/**
-    - .git/**
-    - .doc-build/**
-    - "**/*.pb.go"
-    - "**/generated/**"
-    - dist/**
-    - build/**
-  entry_points:
-    - main.go
-    - cmd/root.go
+```go
+type ProjectConfig struct {
+	Name        string `yaml:"name"`
+	Type        string `yaml:"type"`
+	Description string `yaml:"description"`
+}
 ```
 
-> 來源：`internal/config/config.go#L25-L29`，預設值：`internal/config/config.go#L102-L109`
+> Source: internal/config/config.go#L19-L23
 
-- `include`：以 glob 模式指定要掃描的目錄，支援 `**` 萬用字元
-- `exclude`：排除自動產生的程式碼、依賴套件、建置產物等雜訊路徑
-- `entry_points`：標記核心入口檔案，引導 Claude 優先理解專案架構
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | Current directory name | Project display name used in documentation headings |
+| `type` | string | `"backend"` | Project type. Auto-detected by `selfmd init` from project files (e.g., `go.mod` → `backend`, `package.json` → `frontend`) |
+| `description` | string | `""` | Optional project description |
 
----
+The `selfmd init` command auto-detects project type by checking for marker files:
 
-### `output` — 輸出與語言設定
-
-```yaml
-output:
-  dir: .doc-build               # 文件輸出目錄
-  language: zh-TW               # 主要文件語言（master lang）
-  secondary_languages:          # 次要語言列表（翻譯用）
-    - en-US
-  clean_before_generate: false  # 每次產生前是否清除輸出目錄
+```go
+checks := []struct {
+	file    string
+	pType   string
+	entries []string
+}{
+	{"go.mod", "backend", []string{"main.go", "cmd/root.go"}},
+	{"Cargo.toml", "backend", []string{"src/main.rs", "src/lib.rs"}},
+	{"package.json", "frontend", []string{"src/index.ts", "src/index.js", "src/main.ts", "src/App.tsx"}},
+	{"pom.xml", "backend", []string{"src/main/java"}},
+	{"build.gradle", "backend", []string{"src/main/java"}},
+	{"requirements.txt", "backend", []string{"main.py", "app.py", "src/main.py"}},
+	{"pyproject.toml", "backend", []string{"src/main.py", "main.py"}},
+	{"composer.json", "backend", []string{"public/index.php", "src/Kernel.php"}},
+	{"Gemfile", "backend", []string{"config/application.rb", "app/"}},
+}
 ```
 
-> 來源：`internal/config/config.go#L31-L36`
+> Source: cmd/init.go#L61-L75
 
-**語言代碼**：`language` 與 `secondary_languages` 使用 BCP 47 格式。系統內建支援下列語言代碼：
+### `targets` — File Targeting
 
-| 代碼 | 語言名稱 |
-|------|---------|
-| `zh-TW` | 繁體中文 |
-| `zh-CN` | 简体中文 |
-| `en-US` | English |
-| `ja-JP` | 日本語 |
-| `ko-KR` | 한국어 |
-| `fr-FR` | Français |
-| `de-DE` | Deutsch |
-| `es-ES` | Español |
-| `pt-BR` | Português |
-| `th-TH` | ไทย |
-| `vi-VN` | Tiếng Việt |
+Controls which source files are scanned and included in documentation generation.
 
-> 來源：`internal/config/config.go#L39-L51`
-
-`clean_before_generate` 可被 CLI 旗標 `--clean` 或 `--no-clean` 覆蓋。
-
----
-
-### `claude` — Claude CLI 整合設定
-
-```yaml
-claude:
-  model: sonnet           # Claude 模型識別符
-  max_concurrent: 3       # 最大並行請求數
-  timeout_seconds: 300    # 單次請求逾時（秒），最小值 30
-  max_retries: 2          # 失敗重試次數，最小值 0
-  allowed_tools:          # 允許 Claude 使用的工具清單
-    - Read
-    - Glob
-    - Grep
-  extra_args: []          # 傳遞給 claude CLI 的額外旗標
+```go
+type TargetsConfig struct {
+	Include     []string `yaml:"include"`
+	Exclude     []string `yaml:"exclude"`
+	EntryPoints []string `yaml:"entry_points"`
+}
 ```
 
-> 來源：`internal/config/config.go#L82-L89`，預設值：`internal/config/config.go#L116-L123`
+> Source: internal/config/config.go#L25-L29
 
-`max_concurrent` 控制同時呼叫 Claude CLI 的數量，可透過 `selfmd generate --concurrency <N>` 在執行時覆蓋。
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `include` | []string | `["src/**", "pkg/**", "cmd/**", "internal/**", "lib/**", "app/**"]` | Glob patterns for files to include |
+| `exclude` | []string | `["vendor/**", "node_modules/**", ".git/**", ".doc-build/**", "**/*.pb.go", "**/generated/**", "dist/**", "build/**"]` | Glob patterns for files to exclude |
+| `entry_points` | []string | `[]` | Key files whose content is read and passed to Claude as context |
 
----
+The scanner evaluates exclude patterns first (skipping entire directories when matched), then checks include patterns. Both use the `doublestar` glob library for pattern matching:
 
-### `git` — Git 整合設定
-
-```yaml
-git:
-  enabled: true           # 是否啟用 Git 整合（增量更新）
-  base_branch: main       # 比對差異用的基準分支
+```go
+// check excludes
+for _, pattern := range cfg.Targets.Exclude {
+	matched, _ := doublestar.Match(pattern, rel)
+	if matched {
+		if d.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+}
 ```
 
-> 來源：`internal/config/config.go#L91-L94`
+> Source: internal/scanner/scanner.go#L33-L41
 
-啟用 Git 整合後，`selfmd update` 指令會比對 `base_branch` 與目前工作樹的差異，僅重新產生受影響的文件頁面。
+The `entry_points` field is particularly important — these files are read in full and provided as context to Claude when generating documentation, helping it understand the project's architecture and entry flow.
 
-## 載入與驗證流程
+### `output` — Output Settings
+
+Controls where and how documentation is generated.
+
+```go
+type OutputConfig struct {
+	Dir                 string   `yaml:"dir"`
+	Language            string   `yaml:"language"`
+	SecondaryLanguages  []string `yaml:"secondary_languages"`
+	CleanBeforeGenerate bool     `yaml:"clean_before_generate"`
+}
+```
+
+> Source: internal/config/config.go#L31-L36
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `dir` | string | `".doc-build"` | Output directory for generated documentation |
+| `language` | string | `"zh-TW"` | Primary documentation language |
+| `secondary_languages` | []string | `[]` | Additional languages for translation via `selfmd translate` |
+| `clean_before_generate` | bool | `false` | Whether to wipe the output directory before generating |
+
+The `OutputConfig` also provides helper methods for template language resolution:
+
+```go
+func (o *OutputConfig) GetEffectiveTemplateLang() string {
+	for _, lang := range SupportedTemplateLangs {
+		if o.Language == lang {
+			return o.Language
+		}
+	}
+	return "en-US"
+}
+```
+
+> Source: internal/config/config.go#L58-L65
+
+Currently, built-in prompt templates are available for `zh-TW` and `en-US`. If the configured language does not have a built-in template, selfmd falls back to `en-US` templates and instructs Claude to output in the target language via a language override.
+
+### `claude` — Claude AI Settings
+
+Controls how selfmd interacts with the Claude Code CLI.
+
+```go
+type ClaudeConfig struct {
+	Model          string   `yaml:"model"`
+	MaxConcurrent  int      `yaml:"max_concurrent"`
+	TimeoutSeconds int      `yaml:"timeout_seconds"`
+	MaxRetries     int      `yaml:"max_retries"`
+	AllowedTools   []string `yaml:"allowed_tools"`
+	ExtraArgs      []string `yaml:"extra_args"`
+}
+```
+
+> Source: internal/config/config.go#L82-L89
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | string | `"sonnet"` | Claude model name (e.g., `sonnet`, `opus`, `haiku`) |
+| `max_concurrent` | int | `3` | Maximum number of concurrent Claude calls for content generation |
+| `timeout_seconds` | int | `1800` | Timeout per Claude invocation in seconds |
+| `max_retries` | int | `2` | Number of retries on failure |
+| `allowed_tools` | []string | `["Read", "Glob", "Grep"]` | Tools Claude is allowed to use during documentation generation |
+| `extra_args` | []string | `[]` | Additional CLI arguments passed to the Claude Code command |
+
+The `max_concurrent` setting directly controls parallelism in the content generation phase:
+
+```go
+concurrency := g.Config.Claude.MaxConcurrent
+if opts.Concurrency > 0 {
+	concurrency = opts.Concurrency
+}
+fmt.Printf("[3/4] Generating content pages (concurrency: %d)...\n", concurrency)
+```
+
+> Source: internal/generator/pipeline.go#L130-L134
+
+### `git` — Git Integration Settings
+
+Controls git-based incremental update behavior.
+
+```go
+type GitConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	BaseBranch string `yaml:"base_branch"`
+}
+```
+
+> Source: internal/config/config.go#L91-L94
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Whether git integration is active |
+| `base_branch` | string | `"main"` | Branch used as the baseline for `selfmd update` change detection |
+
+The `base_branch` is used to find the merge base when no saved commit is available:
+
+```go
+base, err := git.GetMergeBase(rootDir, cfg.Git.BaseBranch)
+```
+
+> Source: cmd/update.go#L76
+
+## Core Processes
+
+### Configuration Lifecycle
 
 ```mermaid
 sequenceDiagram
-    participant CLI as CLI 指令
-    participant Load as config.Load()
-    participant Default as DefaultConfig()
-    participant Validate as validate()
+    participant User
+    participant InitCmd as selfmd init
+    participant Config as config.Config
+    participant YAML as selfmd.yaml
+    participant GenCmd as selfmd generate
+    participant Generator as Generator
 
-    CLI->>Load: Load("selfmd.yaml")
-    Load->>Default: 建立預設值
-    Default-->>Load: *Config（含所有預設值）
-    Load->>Load: yaml.Unmarshal（覆蓋使用者設定）
-    Load->>Validate: cfg.validate()
-    Validate->>Validate: 檢查 output.dir 非空
-    Validate->>Validate: 檢查 output.language 非空
-    Validate->>Validate: 修正 max_concurrent < 1
-    Validate->>Validate: 修正 timeout_seconds < 30
-    Validate->>Validate: 修正 max_retries < 0
-    Validate-->>Load: 驗證通過
-    Load-->>CLI: *Config
+    User->>InitCmd: selfmd init
+    InitCmd->>Config: DefaultConfig()
+    InitCmd->>InitCmd: detectProject()
+    InitCmd->>Config: Set project type & entry points
+    Config->>YAML: Save(path)
+
+    User->>YAML: (optional) Manual editing
+
+    User->>GenCmd: selfmd generate
+    GenCmd->>YAML: config.Load(path)
+    YAML->>Config: yaml.Unmarshal + validate()
+    Config->>Generator: NewGenerator(cfg, rootDir, logger)
+    Generator->>Generator: cfg.Output.GetEffectiveTemplateLang()
+    Generator->>Generator: prompt.NewEngine(templateLang)
+    Generator->>Generator: claude.NewRunner(&cfg.Claude, logger)
+    Generator->>Generator: output.NewWriter(cfg.Output.Dir)
 ```
 
-`Load()` 採用「預設值優先，使用者覆蓋」的策略：先建立完整的預設 `Config`，再以 YAML 內容覆蓋指定欄位。未填寫的欄位自動沿用預設值。
+### Configuration Loading and Validation
+
+The `Load` function reads the YAML file, unmarshals it onto a pre-populated default config (so unspecified fields retain their defaults), and runs validation:
 
 ```go
 func Load(path string) (*Config, error) {
-    data, err := os.ReadFile(path)
-    if err != nil {
-        return nil, fmt.Errorf("無法讀取設定檔 %s: %w", path, err)
-    }
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
+	}
 
-    cfg := DefaultConfig()
-    if err := yaml.Unmarshal(data, cfg); err != nil {
-        return nil, fmt.Errorf("設定檔格式錯誤: %w", err)
-    }
+	cfg := DefaultConfig()
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("config file format error: %w", err)
+	}
 
-    if err := cfg.validate(); err != nil {
-        return nil, err
-    }
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 
-    return cfg, nil
+	return cfg, nil
 }
 ```
 
-> 來源：`internal/config/config.go#L131-L147`
+> Source: internal/config/config.go#L131-L147
 
-## Prompt 模板語言選擇邏輯
-
-`output.language` 不只控制文件輸出語言，也影響 Prompt 模板的選擇。目前內建模板僅支援 `zh-TW` 與 `en-US`；其他語言代碼會回退到 `en-US` 模板，並在 Prompt 中插入明確的語言輸出指示。
+The validation rules enforce the following constraints:
 
 ```go
-// GetEffectiveTemplateLang returns which template folder to load.
-func (o *OutputConfig) GetEffectiveTemplateLang() string {
-    for _, lang := range SupportedTemplateLangs {
-        if o.Language == lang {
-            return o.Language
-        }
-    }
-    return "en-US"
-}
-
-// NeedsLanguageOverride returns true when the template language differs from Language.
-func (o *OutputConfig) NeedsLanguageOverride() bool {
-    return o.GetEffectiveTemplateLang() != o.Language
+func (c *Config) validate() error {
+	if c.Output.Dir == "" {
+		return fmt.Errorf("%s", "output.dir must not be empty")
+	}
+	if c.Output.Language == "" {
+		return fmt.Errorf("%s", "output.language must not be empty")
+	}
+	if c.Claude.MaxConcurrent < 1 {
+		c.Claude.MaxConcurrent = 1
+	}
+	if c.Claude.TimeoutSeconds < 30 {
+		c.Claude.TimeoutSeconds = 30
+	}
+	if c.Claude.MaxRetries < 0 {
+		c.Claude.MaxRetries = 0
+	}
+	return nil
 }
 ```
 
-> 來源：`internal/config/config.go#L58-L71`
+> Source: internal/config/config.go#L157-L174
 
-## 相關連結
+Key validation behaviors:
 
-- [設定說明](../index.md) — 設定章節總覽
-- [專案與掃描目標設定](../project-targets/index.md) — `project` 與 `targets` 區段詳解
-- [輸出與多語言設定](../output-language/index.md) — `output` 區段與語言機制
-- [Claude CLI 整合設定](../claude-config/index.md) — `claude` 區段詳解
-- [Git 整合設定](../git-config/index.md) — `git` 區段詳解
-- [selfmd init](../../cli/cmd-init/index.md) — 自動產生設定檔的指令
-- [多語言支援](../../i18n/index.md) — 語言代碼與翻譯工作流程
+- `output.dir` and `output.language` are **required** — an error is returned if they are empty
+- `max_concurrent` is silently clamped to a minimum of `1`
+- `timeout_seconds` is silently clamped to a minimum of `30`
+- `max_retries` is silently clamped to a minimum of `0`
 
-## 參考檔案
+## Usage Examples
 
-| 檔案路徑 | 說明 |
-|----------|------|
-| `internal/config/config.go` | `Config` 結構定義、預設值、載入與驗證邏輯 |
-| `cmd/init.go` | `selfmd init` 實作，包含專案類型自動偵測與設定檔產生 |
-| `cmd/root.go` | 根指令定義，包含 `--config` 旗標宣告 |
-| `cmd/generate.go` | `selfmd generate` 實作，展示設定檔如何傳遞至 Generator |
-| `internal/generator/pipeline.go` | Generator 如何使用 Config 各欄位驅動文件產生流程 |
+### Complete Configuration File
+
+Below is a real-world `selfmd.yaml` from the selfmd project itself:
+
+```yaml
+project:
+    name: selfmd
+    type: cli
+    description: ""
+targets:
+    include:
+        - src/**
+        - pkg/**
+        - cmd/**
+        - internal/**
+        - lib/**
+        - app/**
+    exclude:
+        - vendor/**
+        - node_modules/**
+        - .git/**
+        - .doc-build/**
+        - '**/*.pb.go'
+        - '**/generated/**'
+        - dist/**
+        - build/**
+    entry_points:
+        - main.go
+        - cmd/root.go
+output:
+    dir: docs
+    language: en-US
+    secondary_languages: ["zh-TW"]
+    clean_before_generate: false
+claude:
+    model: opus
+    max_concurrent: 3
+    timeout_seconds: 30000
+    max_retries: 2
+    allowed_tools:
+        - Read
+        - Glob
+        - Grep
+    extra_args: []
+git:
+    enabled: true
+    base_branch: develop
+```
+
+> Source: selfmd.yaml#L1-L43
+
+### CLI Config File Override
+
+The config file path can be overridden using the `--config` (or `-c`) flag on any command:
+
+```go
+rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "selfmd.yaml", "config file path")
+```
+
+> Source: cmd/root.go#L37
+
+This allows maintaining multiple configuration files for different documentation targets or environments.
+
+## Related Links
+
+- [Configuration](../index.md) — Parent section for all configuration topics
+- [Project Targets](../project-targets/index.md) — Detailed documentation on include/exclude patterns and entry points
+- [Output Language](../output-language/index.md) — Supported languages and template resolution
+- [Claude Settings](../claude-config/index.md) — Claude model and concurrency tuning
+- [Git Integration Settings](../git-config/index.md) — Git-based incremental update configuration
+- [init Command](../../cli/cmd-init/index.md) — How `selfmd init` generates the configuration file
+- [generate Command](../../cli/cmd-generate/index.md) — How the generate command consumes configuration
+- [Generation Pipeline](../../architecture/pipeline/index.md) — Architecture of the generation pipeline that uses this configuration
+
+## Reference Files
+
+| File Path | Description |
+|-----------|-------------|
+| `internal/config/config.go` | Core Config struct definition, defaults, loading, validation, and language helpers |
+| `cmd/root.go` | Root command definition with `--config` flag |
+| `cmd/init.go` | `selfmd init` — config generation with project type detection |
+| `cmd/generate.go` | `selfmd generate` — config loading and option overrides |
+| `cmd/update.go` | `selfmd update` — config loading and git integration usage |
+| `cmd/translate.go` | `selfmd translate` — config loading and language validation |
+| `internal/generator/pipeline.go` | Generator struct creation and pipeline using config values |
+| `internal/scanner/scanner.go` | Scanner that applies `targets.include` and `targets.exclude` patterns |
+| `internal/git/git.go` | Git operations using `git.base_branch` config |
+| `internal/generator/updater.go` | Incremental update logic using config for matching and regeneration |
+| `selfmd.yaml` | Real-world configuration example from the selfmd project |

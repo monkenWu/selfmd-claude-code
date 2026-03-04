@@ -14,11 +14,13 @@ targets:
         - vendor/**
         - node_modules/**
         - .git/**
-        - .doc-build/**
+        - .claude/**
         - '**/*.pb.go'
         - '**/generated/**'
         - dist/**
         - build/**
+        - bin/**
+        - docs/**
     entry_points:
         - main.go
         - cmd/root.go
@@ -28,7 +30,7 @@ output:
     secondary_languages: ["zh-TW"]
     clean_before_generate: false
 claude:
-    model: sonnet
+    model: opus
     max_concurrent: 3
     timeout_seconds: 30000
     max_retries: 2
