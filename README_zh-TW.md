@@ -37,23 +37,23 @@
 
 | 平台 | 架構 | 檔案 |
 |------|------|------|
-| macOS | Apple Silicon (arm64) | `selfmd-v1.0.0-macos-arm64` |
-| macOS | Intel (amd64) | `selfmd-v1.0.0-macos-amd64` |
-| Linux | arm64 | `selfmd-v1.0.0-linux-arm64` |
-| Linux | amd64 | `selfmd-v1.0.0-linux-amd64` |
-| Windows | arm64 | `selfmd-v1.0.0-windows-arm64.exe` |
-| Windows | amd64 | `selfmd-v1.0.0-windows-amd64.exe` |
+| macOS | Apple Silicon (arm64) | `selfmd-macos-arm64` |
+| macOS | Intel (amd64) | `selfmd-macos-amd64` |
+| Linux | arm64 | `selfmd-linux-arm64` |
+| Linux | amd64 | `selfmd-linux-amd64` |
+| Windows | arm64 | `selfmd-windows-arm64.exe` |
+| Windows | amd64 | `selfmd-windows-amd64.exe` |
 
 ```bash
 # macOS / Linux：賦予執行權限、重新命名並移至 PATH
-chmod +x selfmd-v1.0.0-macos-arm64
-sudo mv selfmd-v1.0.0-macos-arm64 /usr/local/bin/selfmd
+chmod +x selfmd-macos-arm64
+sudo mv selfmd-macos-arm64 /usr/local/bin/selfmd
 ```
 
 ```powershell
 # Windows (PowerShell)：建立目錄、移動執行檔、加入 PATH
 mkdir "$env:USERPROFILE\selfmd"
-Rename-Item selfmd-v1.0.0-windows-amd64.exe selfmd.exe
+Rename-Item selfmd-windows-amd64.exe selfmd.exe
 Move-Item selfmd.exe "$env:USERPROFILE\selfmd\selfmd.exe"
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:USERPROFILE\selfmd", "User")
 ```
@@ -61,7 +61,7 @@ Move-Item selfmd.exe "$env:USERPROFILE\selfmd\selfmd.exe"
 ```cmd
 :: Windows (CMD)：建立目錄、移動執行檔、加入 PATH
 mkdir "%USERPROFILE%\selfmd"
-ren selfmd-v1.0.0-windows-amd64.exe selfmd.exe
+ren selfmd-windows-amd64.exe selfmd.exe
 move selfmd.exe "%USERPROFILE%\selfmd\selfmd.exe"
 setx Path "%Path%;%USERPROFILE%\selfmd"
 ```

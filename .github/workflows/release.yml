@@ -37,7 +37,6 @@ jobs:
 
       - name: Build binaries
         run: |
-          VERSION="${{ steps.release_type.outputs.tag }}"
           mkdir -p ./bin
 
           PLATFORMS=(
@@ -56,7 +55,7 @@ jobs:
             if [ "$GOOS" = "darwin" ]; then
               os_name="macos"
             fi
-            output="./bin/selfmd-${VERSION}-${os_name}-${GOARCH}"
+            output="./bin/selfmd-${os_name}-${GOARCH}"
             if [ "$GOOS" = "windows" ]; then
               output="${output}.exe"
             fi
