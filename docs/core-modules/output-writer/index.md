@@ -1,126 +1,108 @@
-# 輸出寫入與連結修復
+# Output Writer
 
-`internal/output` 套件負責將已產生的 Markdown 文件寫入磁碟、修復文件內的相對連結、產生導航結構，以及打包靜態瀏覽器資源。
+The Output Writer module (`internal/output`) is responsible for all file I/O operations related to generated documentation. It writes Markdown pages, navigation files, catalog JSON, and static viewer assets to the output directory.
 
-## 概述
+## Overview
 
-完成 Claude CLI 的內容產生後，系統需要將結果持久化到 `.doc-build/` 輸出目錄，並確保頁面之間的內部連結是有效且可跳轉的。`output` 套件由四個相互配合的元件組成：
+The Output Writer sits at the final stage of the documentation generation pipeline. After Claude generates Markdown content, the Output Writer handles:
 
-| 元件 | 檔案 | 職責 |
-|------|------|------|
-| `Writer` | `writer.go` | 低階檔案 I/O，統一管理所有寫入操作 |
-| `LinkFixer` | `linkfixer.go` | 偵測並修復破損的相對連結 |
-| Navigation 函式 | `navigation.go` | 產生 `index.md`、`_sidebar.md` 及分類索引頁 |
-| `WriteViewer` | `viewer.go` | 打包靜態 HTML/JS/CSS 及 `_data.js` 資料包 |
+- **File persistence** — Writing generated Markdown pages to the correct directory structure
+- **Link validation and repair** — Fixing broken relative links produced by the AI
+- **Navigation generation** — Creating index pages, sidebars, and category indices
+- **Static viewer bundling** — Packaging all content into an offline-capable HTML viewer
+- **Incremental state tracking** — Saving catalog JSON and commit hashes for incremental updates
+- **Multi-language support** — Writing translated content to language-specific subdirectories
 
-在管線中，`output` 套件在第三階段（內容頁面產生）與第四階段（導航與靜態瀏覽器產生）均被呼叫。
+The module is contained in the `internal/output` package, which exposes four primary components: `Writer`, `LinkFixer`, navigation generators, and viewer bundling.
 
-## 架構
+## Architecture
 
 ```mermaid
 flowchart TD
-    Generator["Generator（pipeline.go）"]
+    Generator["Generator (pipeline.go)"]
+    Writer["Writer (writer.go)"]
+    LinkFixer["LinkFixer (linkfixer.go)"]
+    Navigation["Navigation (navigation.go)"]
+    Viewer["Viewer (viewer.go)"]
+    Catalog["Catalog (catalog.go)"]
+    FS["File System (.doc-build/)"]
 
-    subgraph output_pkg["internal/output 套件"]
-        Writer["Writer\n（writer.go）"]
-        LinkFixer["LinkFixer\n（linkfixer.go）"]
-        NavFuncs["Navigation 函式\n（navigation.go）"]
-        ViewerFunc["WriteViewer\n（viewer.go）"]
+    Generator --> Writer
+    Generator --> LinkFixer
+    Generator --> Navigation
+    Generator --> Viewer
+
+    Writer --> FS
+    LinkFixer --> Catalog
+    Navigation --> Catalog
+    Viewer --> Writer
+
+    subgraph OutputPackage["internal/output"]
+        Writer
+        LinkFixer
+        Navigation
+        Viewer
     end
-
-    subgraph output_dir[".doc-build/ 輸出目錄"]
-        Pages["*.md 文件頁面"]
-        Catalog["_catalog.json"]
-        LastCommit["_last_commit"]
-        Index["index.md / _sidebar.md"]
-        HTML["index.html / app.js / style.css"]
-        DataJS["_data.js（資料包）"]
-        DocMeta["_doc_meta.json"]
-    end
-
-    Generator -->|"WritePage / WriteFile"| Writer
-    Generator -->|"NewLinkFixer → FixLinks"| LinkFixer
-    Generator -->|"GenerateIndex / GenerateSidebar"| NavFuncs
-    Generator -->|"WriteViewer"| ViewerFunc
-
-    Writer --> Pages
-    Writer --> Catalog
-    Writer --> LastCommit
-    NavFuncs --> Index
-    ViewerFunc --> HTML
-    ViewerFunc --> DataJS
-    ViewerFunc --> DocMeta
-
-    LinkFixer -.->|"修復後傳回 content"| Writer
 ```
 
-## Writer — 檔案寫入器
+The `Writer` struct is the core I/O component. The `LinkFixer`, navigation generators, and viewer bundler all collaborate with `Writer` to produce the final documentation output.
 
-`Writer` 是所有磁碟操作的統一入口，持有輸出目錄的絕對路徑 `BaseDir`（預設為 `.doc-build/`）。
+## Writer
 
-### 結構定義
+The `Writer` struct manages all filesystem interactions. It operates relative to a base directory (typically `.doc-build/`).
+
+### Struct Definition
 
 ```go
-// Writer handles writing documentation files to the output directory.
 type Writer struct {
 	BaseDir string // absolute path to .doc-build/
 }
-
-// NewWriter creates a new output writer.
-func NewWriter(baseDir string) *Writer {
-	return &Writer{BaseDir: baseDir}
-}
 ```
 
-> 來源：internal/output/writer.go#L26-L33
+> Source: internal/output/writer.go#L26-L28
 
-### 核心方法
+### Key Operations
 
-#### 目錄與生命週期
+| Method | Purpose |
+|--------|---------|
+| `Clean()` | Removes and recreates the output directory |
+| `EnsureDir()` | Creates the output directory if it doesn't exist |
+| `WritePage()` | Writes a documentation page for a catalog item |
+| `WriteFile()` | Writes an arbitrary file under the output directory |
+| `WriteCatalogJSON()` | Saves the catalog as `_catalog.json` |
+| `ReadCatalogJSON()` | Reads the saved catalog JSON |
+| `PageExists()` | Checks if a page exists and has valid content |
+| `ReadPage()` | Reads the content of a documentation page |
+| `SaveLastCommit()` | Saves the current commit hash for incremental updates |
+| `ReadLastCommit()` | Reads the saved commit hash |
+| `ForLanguage()` | Returns a new Writer scoped to a language subdirectory |
 
-```go
-// Clean removes the output directory and recreates it.
-func (w *Writer) Clean() error {
-	if err := os.RemoveAll(w.BaseDir); err != nil {
-		return fmt.Errorf("清除輸出目錄失敗: %w", err)
-	}
-	return os.MkdirAll(w.BaseDir, 0755)
-}
+### Page Writing
 
-// EnsureDir ensures the output directory exists.
-func (w *Writer) EnsureDir() error {
-	return os.MkdirAll(w.BaseDir, 0755)
-}
-```
-
-> 來源：internal/output/writer.go#L36-L46
-
-#### 頁面寫入與讀取
+`WritePage` maps a catalog item to a directory path and writes the content as `index.md`:
 
 ```go
-// WritePage writes a documentation page for a catalog item.
 func (w *Writer) WritePage(item catalog.FlatItem, content string) error {
 	dir := filepath.Join(w.BaseDir, item.DirPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("建立目錄 %s 失敗: %w", dir, err)
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
 	path := filepath.Join(dir, "index.md")
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		return fmt.Errorf("寫入 %s 失敗: %w", path, err)
+		return fmt.Errorf("failed to write %s: %w", path, err)
 	}
 	return nil
 }
 ```
 
-> 來源：internal/output/writer.go#L48-L60
+> Source: internal/output/writer.go#L49-L60
 
-`WritePage` 接受 `catalog.FlatItem`（目錄項目的扁平化結構），自動在對應的 `DirPath` 下建立 `index.md`。
+### Page Existence Check
 
-#### 頁面存在性驗證
+`PageExists` verifies that a page file exists, is non-empty, and does not contain the failure marker. This is used by the pipeline to skip already-generated pages during non-clean runs:
 
 ```go
-// PageExists checks if a documentation page exists and has valid content.
 func (w *Writer) PageExists(item catalog.FlatItem) bool {
 	path := filepath.Join(w.BaseDir, item.DirPath, "index.md")
 	data, err := os.ReadFile(path)
@@ -131,21 +113,26 @@ func (w *Writer) PageExists(item catalog.FlatItem) bool {
 	if content == "" {
 		return false
 	}
-	if strings.Contains(content, "此頁面產生失敗") {
+	// Only check the first 500 bytes for the failure marker to avoid false positives
+	// when translated docs reference the marker string in their content.
+	head := content
+	if len(head) > 500 {
+		head = head[:500]
+	}
+	if strings.Contains(head, "This page failed to generate") {
 		return false
 	}
 	return true
 }
 ```
 
-> 來源：internal/output/writer.go#L95-L111
+> Source: internal/output/writer.go#L96-L117
 
-`PageExists` 不只檢查檔案是否存在，還會排除空白頁面與失敗佔位頁（含有「此頁面產生失敗」標記），確保增量更新時能正確判斷哪些頁面需要重新產生。
+### Multi-Language Support
 
-#### 多語言支援
+`ForLanguage` creates a derived Writer that writes to a language-specific subdirectory (e.g., `.doc-build/en-US/`):
 
 ```go
-// ForLanguage returns a new Writer that writes to a language-specific subdirectory.
 func (w *Writer) ForLanguage(lang string) *Writer {
 	return &Writer{
 		BaseDir: filepath.Join(w.BaseDir, lang),
@@ -153,34 +140,41 @@ func (w *Writer) ForLanguage(lang string) *Writer {
 }
 ```
 
-> 來源：internal/output/writer.go#L138-L143
+> Source: internal/output/writer.go#L145-L149
 
-多語系的翻譯內容會寫入 `.doc-build/{lang}/` 子目錄，`ForLanguage` 建立指向該子目錄的 `Writer` 實例。
+## LinkFixer
 
-#### 持久化輔助檔案
+The `LinkFixer` post-processes generated Markdown to repair broken relative links. Since Claude may produce incorrect link formats (dot-notation, missing paths, wrong relative depth), the LinkFixer uses a fuzzy matching strategy to resolve and fix them.
 
-| 方法 | 檔案 | 用途 |
-|------|------|------|
-| `WriteCatalogJSON` | `_catalog.json` | 保存目錄結構，供增量更新重複使用 |
-| `ReadCatalogJSON` | `_catalog.json` | 讀回目錄結構 |
-| `SaveLastCommit` | `_last_commit` | 保存 Git commit hash |
-| `ReadLastCommit` | `_last_commit` | 讀取上次 commit，用於 diff 計算 |
+### How It Works
 
-## LinkFixer — 連結修復器
+```mermaid
+sequenceDiagram
+    participant Content as Generated Content
+    participant LF as LinkFixer
+    participant Index as Path Index
+    participant Result as Fixed Content
 
-`LinkFixer` 在內容寫入磁碟前對 Markdown 中的所有內部連結進行驗證與修復，處理 Claude 產生的連結格式不正確（如 dot-notation、缺少路徑段等）的問題。
+    Content->>LF: FixLinks(content, currentDirPath)
+    LF->>LF: Regex scan for [text](target)
+    LF->>LF: Skip external/anchor/image links
+    LF->>LF: resolveRelative(target)
+    alt Already valid
+        LF->>Result: Keep original link
+    else Broken link
+        LF->>LF: extractPathSlug(target)
+        LF->>Index: Fuzzy lookup (exact, lowercase, last segment, hyphenated, suffix)
+        Index-->>LF: targetDirPath
+        LF->>LF: computeRelativePath(from, to)
+        LF->>Result: Replace with fixed link
+    end
+```
 
-### 初始化
+### Index Construction
+
+When created, the `LinkFixer` builds a lookup index from the catalog with multiple keys for each item — enabling fuzzy matching on dot-notation paths, slash paths, and last-segment slugs:
 
 ```go
-// LinkFixer validates and fixes relative links in generated markdown content.
-type LinkFixer struct {
-	allItems  []catalog.FlatItem
-	dirPaths  map[string]bool   // set of all valid dirPaths
-	pathIndex map[string]string // various lookup keys → dirPath
-}
-
-// NewLinkFixer creates a link fixer from a catalog.
 func NewLinkFixer(cat *catalog.Catalog) *LinkFixer {
 	items := cat.Flatten()
 	dirPaths := make(map[string]bool)
@@ -200,6 +194,9 @@ func NewLinkFixer(cat *catalog.Catalog) *LinkFixer {
 		if _, exists := pathIndex[lastSeg]; !exists {
 			pathIndex[lastSeg] = item.DirPath
 		}
+
+		// index by slug-like variations
+		pathIndex[strings.ToLower(item.DirPath)] = item.DirPath
 	}
 
 	return &LinkFixer{
@@ -210,84 +207,82 @@ func NewLinkFixer(cat *catalog.Catalog) *LinkFixer {
 }
 ```
 
-> 來源：internal/output/linkfixer.go#L11-L48
+> Source: internal/output/linkfixer.go#L19-L48
 
-`pathIndex` 建立多種鍵值索引，讓後續的模糊查找更有彈性：
-- `dirPath`（如 `core-modules/scanner`）
-- `dot-notation path`（如 `core-modules.scanner`）
-- 最後一個路徑段（如 `scanner`）
-- 小寫版本
+### Fuzzy Resolution Strategy
 
-### 連結修復流程
+The `fixSingleLink` method tries multiple strategies in order:
 
-```go
-// FixLinks scans markdown content for relative links and fixes broken ones.
-func (lf *LinkFixer) FixLinks(content string, currentDirPath string) string {
-	// match markdown links: [text](target)
-	linkRe := regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
-
-	return linkRe.ReplaceAllStringFunc(content, func(match string) string {
-		// ...skip external links, anchors, images...
-		fixed := lf.fixSingleLink(target, currentDirPath)
-		if fixed != "" && fixed != target {
-			return "[" + text + "](" + fixed + ")"
-		}
-		return match
-	})
-}
-```
-
-> 來源：internal/output/linkfixer.go#L50-L82
-
-修復策略依序為：
-
-```mermaid
-flowchart TD
-    A["取得連結 target"] --> B{"是否為外部連結\n/ anchor / 圖片？"}
-    B -->|是| Z["原樣保留"]
-    B -->|否| C["resolveRelative：\n嘗試直接解析相對路徑"]
-    C --> D{"是否指向有效頁面？"}
-    D -->|是| Z
-    D -->|否| E["extractPathSlug：\n清理 target（去除 ../ .md /index.md）"]
-    E --> F["在 pathIndex 中查找（精確）"]
-    F --> G{"找到？"}
-    G -->|是| H["computeRelativePath：\n計算正確相對路徑"]
-    G -->|否| I["小寫查找"]
-    I --> J{"找到？"}
-    J -->|是| H
-    J -->|否| K["最後一段 / 連字符組合查找"]
-    K --> L{"找到？"}
-    L -->|是| H
-    L -->|否| M["suffix 子字串比對"]
-    M --> N{"找到？"}
-    N -->|是| H
-    N -->|否| Z
-    H --> O["輸出修正後的連結"]
-```
-
-### 相對路徑計算
+1. **Direct resolution** — Check if the relative path already resolves to a valid catalog item
+2. **Exact index match** — Look up the cleaned slug in the path index
+3. **Case-insensitive match** — Try lowercase version
+4. **Last segment match** — Extract the final path segment and look it up
+5. **Hyphenated combination** — Combine the last two segments with a hyphen (e.g., `prompt/engine` → `prompt-engine`)
+6. **Suffix match** — Scan all known directory paths for a matching suffix
 
 ```go
-// computeRelativePath computes the relative path from one catalog item to another.
-func (lf *LinkFixer) computeRelativePath(fromDirPath, toDirPath string) string {
-	rel, err := filepath.Rel(fromDirPath, toDirPath)
-	if err != nil {
+func (lf *LinkFixer) fixSingleLink(target, currentDirPath string) string {
+	// already a valid relative link pointing to existing page?
+	resolved := lf.resolveRelative(target, currentDirPath)
+	if resolved != "" && lf.isValidTarget(resolved) {
+		return target // already correct
+	}
+
+	// extract the "meaningful" part from the target
+	cleaned := lf.extractPathSlug(target)
+	if cleaned == "" {
 		return ""
 	}
-	rel = filepath.ToSlash(rel)
-	return rel + "/index.md"
+
+	// look up in index
+	targetDirPath, found := lf.pathIndex[cleaned]
+	if !found {
+		// try lowercase
+		targetDirPath, found = lf.pathIndex[strings.ToLower(cleaned)]
+	}
+	if !found {
+		// try last segment only
+		segments := strings.FieldsFunc(cleaned, func(r rune) bool {
+			return r == '.' || r == '/'
+		})
+		if len(segments) > 0 {
+			last := segments[len(segments)-1]
+			targetDirPath, found = lf.pathIndex[last]
+		}
+		// try combining last two segments with hyphen
+		if !found && len(segments) >= 2 {
+			hyphenated := segments[len(segments)-2] + "-" + segments[len(segments)-1]
+			targetDirPath, found = lf.pathIndex[hyphenated]
+		}
+	}
+	if !found {
+		// substring match: find any dirPath that ends with the cleaned slug
+		for dp := range lf.dirPaths {
+			if strings.HasSuffix(dp, "/"+cleaned) || strings.HasSuffix(dp, "/"+strings.ReplaceAll(cleaned, "/", "-")) {
+				targetDirPath = dp
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return "" // can't fix
+	}
+
+	// compute correct relative path from currentDirPath to targetDirPath
+	return lf.computeRelativePath(currentDirPath, targetDirPath)
 }
 ```
 
-> 來源：internal/output/linkfixer.go#L174-L182
+> Source: internal/output/linkfixer.go#L84-L134
 
-所有修復後的連結均統一為 `{相對路徑}/index.md` 格式。
+## Navigation Generation
 
-## Navigation — 導航產生
+The `navigation.go` file provides functions to generate structural navigation pages: the main index, sidebar, and category index pages. These functions are stateless — they take catalog data and a language code, and return Markdown strings.
 
-`navigation.go` 提供三個純函式，產生文件的導航結構，不依賴任何外部狀態。
+### Localized UI Strings
 
-### 多語言 UI 字串
+Navigation pages use localized UI strings. The module provides built-in strings for `zh-TW` and `en-US`, with `en-US` as the fallback:
 
 ```go
 var UIStrings = map[string]map[string]string{
@@ -300,42 +295,52 @@ var UIStrings = map[string]map[string]string{
 	},
 	"en-US": {
 		"techDocs":        "Technical Documentation",
-		// ...
+		"catalog":         "Table of Contents",
+		"home":            "Home",
+		"sectionContains": "This section contains the following:",
+		"autoGenerated":   "This documentation was automatically generated by [selfmd](https://github.com/monkenwu/selfmd)",
 	},
 }
 ```
 
-> 來源：internal/output/navigation.go#L12-L27
+> Source: internal/output/navigation.go#L12-L27
 
-### 三個導航產生函式
+### Generated Files
 
-| 函式 | 產生目標 | 說明 |
-|------|---------|------|
-| `GenerateIndex` | `index.md` | 主頁，列出完整目錄並附上連結 |
-| `GenerateSidebar` | `_sidebar.md` | 側邊欄導航，供靜態瀏覽器使用 |
-| `GenerateCategoryIndex` | 各父節點的 `index.md` | 列出子章節的分類索引頁 |
+| Function | Output File | Description |
+|----------|-------------|-------------|
+| `GenerateIndex` | `index.md` | Main landing page with project name, description, and full table of contents |
+| `GenerateSidebar` | `_sidebar.md` | Sidebar navigation with hierarchical links |
+| `GenerateCategoryIndex` | `{category}/index.md` | Section index listing child pages |
+
+### Category Index Generation
+
+For catalog items that have children, `GenerateCategoryIndex` produces a simple listing page:
 
 ```go
-// GenerateIndex generates the main index.md landing page.
-func GenerateIndex(projectName, projectDesc string, cat *catalog.Catalog, lang string) string {
+func GenerateCategoryIndex(item catalog.FlatItem, children []catalog.FlatItem, lang string) string {
 	ui := getUIStrings(lang)
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("# %s %s\n\n", projectName, ui["techDocs"]))
-	// ...
-	for _, item := range cat.Items {
-		writeIndexItem(&sb, item, "", 0)
+
+	sb.WriteString(fmt.Sprintf("# %s\n\n", item.Title))
+	sb.WriteString(ui["sectionContains"] + "\n\n")
+
+	for _, child := range children {
+		relPath := computeRelativePath(item.DirPath, child.DirPath)
+		sb.WriteString(fmt.Sprintf("- [%s](%s/index.md)\n", child.Title, relPath))
 	}
-	// ...
+
+	return sb.String()
 }
 ```
 
-> 來源：internal/output/navigation.go#L37-L59
+> Source: internal/output/navigation.go#L100-L114
 
-## WriteViewer — 靜態瀏覽器打包
+## Static Viewer
 
-`viewer.go` 利用 Go 的 `//go:embed` 指令將靜態瀏覽器資源直接嵌入二進位檔案，並在產生時寫出，無需外部網路資源。
+The `viewer.go` file handles writing the static documentation viewer — an offline-capable HTML/JS/CSS application that renders Markdown documentation in the browser. It uses Go's `embed` directive to bundle the viewer assets at compile time.
 
-### 嵌入式資源
+### Embedded Assets
 
 ```go
 //go:embed viewer/index.html
@@ -348,57 +353,47 @@ var viewerJS string
 var viewerCSS string
 ```
 
-> 來源：internal/output/viewer.go#L12-L19
+> Source: internal/output/viewer.go#L13-L20
 
-### 資料打包（`_data.js`）
+### WriteViewer Process
 
-```go
-// bundleData walks the output directory, collects all .md files and _catalog.json,
-// and writes them as a single _data.js file for client-side rendering.
-func (w *Writer) bundleData(projectName string, docMeta *DocMeta) error {
-	// ...
-	// Build data object
-	data := map[string]interface{}{
-		"catalog": catalogObj,
-		"pages":   pages,
-	}
-	// ...
-	content := "window.DOC_DATA = " + string(jsonBytes) + ";\n"
-	return w.WriteFile("_data.js", content)
-}
+```mermaid
+flowchart TD
+    Start["WriteViewer()"] --> InjectVars["Inject project name and language into index.html"]
+    InjectVars --> WriteHTML["Write index.html"]
+    WriteHTML --> WriteAssets["Write app.js and style.css"]
+    WriteAssets --> WriteMeta["Write _doc_meta.json"]
+    WriteMeta --> BundleData["bundleData()"]
+
+    BundleData --> ReadCatalog["Read _catalog.json"]
+    ReadCatalog --> WalkMD["Walk .doc-build/ for .md files"]
+    WalkMD --> SkipLang["Skip language subdirectories"]
+    SkipLang --> SkipMeta["Skip files starting with _"]
+    SkipMeta --> CollectPages["Collect page content map"]
+    CollectPages --> AddLangData["Collect secondary language data"]
+    AddLangData --> SerializeJSON["Serialize to JSON"]
+    SerializeJSON --> WriteDataJS["Write _data.js"]
 ```
 
-> 來源：internal/output/viewer.go#L61-L193
-
-`_data.js` 將所有 Markdown 頁面內容和目錄結構序列化為 JSON，以 `window.DOC_DATA` 全域變數注入，讓瀏覽器端的 `app.js` 可在不啟動伺服器的情況下渲染文件。
-
-多語言模式下，次要語言（Secondary Language）的頁面也會被收集並放入 `data["languages"][langCode]`：
+The `bundleData` method walks the output directory, collects all `.md` files and catalog data, then serializes everything into a single `_data.js` file as `window.DOC_DATA`:
 
 ```go
-languages := make(map[string]interface{})
-for _, lang := range docMeta.AvailableLanguages {
-    if lang.IsDefault {
-        continue
-    }
-    // Read lang-specific catalog and pages from .doc-build/{lang}/
-    langEntry["catalog"] = catObj
-    langEntry["pages"] = langPages
-    languages[lang.Code] = langEntry
-}
+content := "window.DOC_DATA = " + string(jsonBytes) + ";\n"
+return w.WriteFile("_data.js", content)
 ```
 
-> 來源：internal/output/viewer.go#L135-L185
+> Source: internal/output/viewer.go#L193-L194
 
-### DocMeta — 語言元資料
+### DocMeta Structure
+
+The `DocMeta` struct carries language metadata used by both the viewer and the data bundle:
 
 ```go
-// DocMeta holds metadata about the documentation build, including language info.
 type DocMeta struct {
 	DefaultLanguage    string     `json:"default_language"`
 	AvailableLanguages []LangInfo `json:"available_languages"`
 }
 
-// LangInfo describes a single available language.
 type LangInfo struct {
 	Code       string `json:"code"`
 	NativeName string `json:"native_name"`
@@ -406,123 +401,135 @@ type LangInfo struct {
 }
 ```
 
-> 來源：internal/output/writer.go#L12-L23
+> Source: internal/output/writer.go#L13-L23
 
-## 核心流程
+## Core Processes
 
-### 內容頁面寫入序列
+### Full Generation Pipeline Integration
+
+The Writer is used throughout the generation pipeline. Here is how each pipeline phase interacts with the output module:
 
 ```mermaid
 sequenceDiagram
-    participant G as Generator
+    participant P as Pipeline
+    participant W as Writer
     participant LF as LinkFixer
-    participant W as Writer
-    participant FS as 檔案系統
+    participant Nav as Navigation
+    participant V as Viewer
 
-    G->>LF: NewLinkFixer(cat)
-    Note over LF: 建立 pathIndex 多鍵索引
+    Note over P,V: Phase 0: Setup
+    P->>W: Clean() or EnsureDir()
 
-    loop 每個 catalog.FlatItem
-        G->>G: generateSinglePage（呼叫 Claude）
-        G->>G: claude.ExtractDocumentTag（擷取 document 標籤）
-        G->>LF: FixLinks(content, item.DirPath)
-        LF->>LF: regexp 掃描所有 [text](target)
-        LF->>LF: fixSingleLink（模糊查找 + 計算相對路徑）
-        LF-->>G: 修復後的 content
-        G->>W: WritePage(item, content)
-        W->>FS: MkdirAll + WriteFile（index.md）
-    end
-```
-
-### 完整管線中的角色
-
-```mermaid
-sequenceDiagram
-    participant P as pipeline.go
-    participant W as Writer
-    participant Nav as navigation.go
-    participant V as viewer.go
-
-    P->>W: Clean() 或 EnsureDir()
+    Note over P,V: Phase 2: Catalog
+    P->>W: ReadCatalogJSON() (try reuse)
     P->>W: WriteCatalogJSON(cat)
-    P->>Nav: GenerateIndex / GenerateSidebar / GenerateCategoryIndex
-    Nav-->>P: Markdown 字串
-    P->>W: WriteFile("index.md")
-    P->>W: WriteFile("_sidebar.md")
-    P->>W: WritePage(item, categoryContent)
-    P->>V: WriteViewer(projectName, docMeta)
-    V->>W: WriteFile("index.html" / "app.js" / "style.css")
-    V->>V: bundleData（掃描所有 .md）
-    V->>W: WriteFile("_data.js")
-    V->>W: WriteFile("_doc_meta.json")
+
+    Note over P,V: Phase 3: Content
+    P->>LF: NewLinkFixer(cat)
+    P->>W: PageExists(item) (skip check)
+    P->>LF: FixLinks(content, dirPath)
+    P->>W: WritePage(item, content)
+
+    Note over P,V: Phase 4: Index & Navigation
+    P->>Nav: GenerateIndex()
+    P->>W: WriteFile("index.md", ...)
+    P->>Nav: GenerateSidebar()
+    P->>W: WriteFile("_sidebar.md", ...)
+    P->>Nav: GenerateCategoryIndex()
+    P->>W: WritePage(item, ...)
+
+    Note over P,V: Final: Viewer & State
+    P->>V: WriteViewer()
+    P->>W: WriteFile(".nojekyll", "")
     P->>W: SaveLastCommit(commit)
 ```
 
-## 使用範例
+### Incremental Update Flow
 
-### Writer 初始化（來自 Generator）
+During incremental updates, the Writer's read capabilities are equally important — `ReadCatalogJSON`, `ReadPage`, and `ReadLastCommit` enable the updater to detect what already exists and what needs regeneration:
 
 ```go
-absOutDir := cfg.Output.Dir
-if absOutDir == "" {
-    absOutDir = ".doc-build"
-}
-
-writer := output.NewWriter(absOutDir)
+// Read existing catalog
+existingCatalogJSON, err := g.Writer.ReadCatalogJSON()
 ```
 
-> 來源：internal/generator/pipeline.go#L43-L48
-
-### 在內容產生階段使用 LinkFixer
+> Source: internal/generator/updater.go#L34
 
 ```go
-// Build the link fixer once for all pages
-linkFixer := output.NewLinkFixer(cat)
-
-// ...（並行產生每個頁面後）
-
-// Post-process: fix broken links
-content = linkFixer.FixLinks(content, item.DirPath)
-
-return g.Writer.WritePage(item, content)
+// Read existing content to pass as context for regeneration
+existing, _ := g.Writer.ReadPage(item)
 ```
 
-> 來源：internal/generator/content_phase.go#L29-L153
+> Source: internal/generator/updater.go#L141
 
-### 多語言 Writer
+### Translation Output Flow
+
+For multi-language support, the `ForLanguage` method creates a scoped Writer per target language. The translation phase writes translated pages, catalogs, navigation, and category indices to language subdirectories:
 
 ```go
-// ForLanguage returns a new Writer that writes to a language-specific subdirectory.
-func (w *Writer) ForLanguage(lang string) *Writer {
-    return &Writer{
-        BaseDir: filepath.Join(w.BaseDir, lang),
-    }
+langWriter := g.Writer.ForLanguage(targetLang)
+if err := langWriter.EnsureDir(); err != nil {
+    return fmt.Errorf("failed to create language directory: %w", err)
 }
 ```
 
-> 來源：internal/output/writer.go#L138-L143
+> Source: internal/generator/translate_phase.go#L55-L58
 
-翻譯階段呼叫 `w.ForLanguage("en-US")` 即可取得指向 `.doc-build/en-US/` 的 Writer，翻譯後的頁面寫入後也會被 `bundleData` 收集進 `_data.js`。
+## Output Directory Structure
 
-## 相關連結
+The Writer produces the following directory structure:
 
-- [文件產生管線](../generator/index.md) — 管線如何呼叫 `Writer` 與 `LinkFixer`
-- [內容頁面產生階段](../generator/content-phase/index.md) — `LinkFixer.FixLinks` 的使用時機
-- [索引與導航產生階段](../generator/index-phase/index.md) — Navigation 函式的呼叫方
-- [靜態文件瀏覽器](../static-viewer/index.md) — `_data.js` 的消費端
-- [文件目錄管理](../catalog/index.md) — `catalog.FlatItem` 與 `catalog.Catalog` 的定義
-- [增量更新](../incremental-update/index.md) — `PageExists`、`ReadLastCommit` 的使用情境
-- [翻譯階段](../generator/translate-phase/index.md) — `ForLanguage` 的使用情境
+```
+.doc-build/
+├── index.html              # Static viewer entry point
+├── app.js                  # Viewer JavaScript
+├── style.css               # Viewer stylesheet
+├── _data.js                # Bundled content for offline viewing
+├── _catalog.json           # Catalog structure (JSON)
+├── _doc_meta.json          # Language metadata
+├── _sidebar.md             # Sidebar navigation
+├── _last_commit            # Last processed git commit hash
+├── .nojekyll               # GitHub Pages compatibility
+├── index.md                # Main landing page
+├── overview/
+│   └── index.md
+├── core-modules/
+│   ├── index.md            # Category index (auto-generated)
+│   ├── scanner/
+│   │   └── index.md
+│   └── ...
+└── en-US/                  # Secondary language directory
+    ├── _catalog.json
+    ├── _sidebar.md
+    ├── index.md
+    └── ...
+```
 
-## 參考檔案
+## Related Links
 
-| 檔案路徑 | 說明 |
-|----------|------|
-| `internal/output/writer.go` | `Writer` 結構定義、頁面寫入、持久化輔助方法、`DocMeta` 定義 |
-| `internal/output/linkfixer.go` | `LinkFixer` 結構、多鍵索引建立、連結掃描與修復邏輯 |
-| `internal/output/navigation.go` | `GenerateIndex`、`GenerateSidebar`、`GenerateCategoryIndex` 及多語言 UI 字串 |
-| `internal/output/viewer.go` | `WriteViewer`、`bundleData`、嵌入式靜態資源寫出 |
-| `internal/catalog/catalog.go` | `Catalog`、`CatalogItem`、`FlatItem` 定義與 `Flatten` 方法 |
-| `internal/generator/pipeline.go` | `Generator` 結構、四階段管線主流程、`buildDocMeta` |
-| `internal/generator/content_phase.go` | `GenerateContent`、`generateSinglePage`、`LinkFixer` 使用方式 |
-| `internal/generator/index_phase.go` | `GenerateIndex` 呼叫 Navigation 函式的實作 |
+- [Documentation Generator](../generator/index.md)
+- [Content Phase](../generator/content-phase/index.md)
+- [Index Phase](../generator/index-phase/index.md)
+- [Translate Phase](../generator/translate-phase/index.md)
+- [Catalog Manager](../catalog/index.md)
+- [Static Viewer](../static-viewer/index.md)
+- [Incremental Update Engine](../incremental-update/index.md)
+- [Generation Pipeline](../../architecture/pipeline/index.md)
+- [Output Structure](../../overview/output-structure/index.md)
+- [Output Language](../../configuration/output-language/index.md)
+
+## Reference Files
+
+| File Path | Description |
+|-----------|-------------|
+| `internal/output/writer.go` | Core Writer struct with file I/O operations and DocMeta types |
+| `internal/output/linkfixer.go` | LinkFixer for validating and repairing relative links |
+| `internal/output/navigation.go` | Navigation page generators (index, sidebar, category) |
+| `internal/output/viewer.go` | Static viewer writer and data bundler |
+| `internal/generator/pipeline.go` | Generator struct and full pipeline orchestration |
+| `internal/generator/content_phase.go` | Content generation phase using Writer and LinkFixer |
+| `internal/generator/index_phase.go` | Index generation phase using navigation functions |
+| `internal/generator/translate_phase.go` | Translation phase using ForLanguage Writer |
+| `internal/generator/updater.go` | Incremental update using Writer read/write methods |
+| `internal/catalog/catalog.go` | Catalog types consumed by Writer and LinkFixer |
+| `internal/config/config.go` | OutputConfig defining output directory and language settings |

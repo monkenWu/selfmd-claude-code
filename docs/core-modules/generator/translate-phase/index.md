@@ -1,376 +1,476 @@
-# 翻譯階段
+# Translate Phase
 
-翻譯階段負責將主要語言產生的文件，透過 Claude CLI 批次翻譯為 `selfmd.yaml` 設定中所定義的次要語言，並在對應的語言子目錄中產生完整的導航結構。
+The Translate Phase is responsible for translating generated documentation from the primary language into one or more secondary languages using Claude AI, producing complete localized documentation sets.
 
-## 概述
+## Overview
 
-翻譯階段是獨立於四階段文件產生管線之外的附加流程，由 `selfmd translate` 指令觸發。其核心設計原則是：
+The Translate Phase is the final optional stage in the selfmd documentation pipeline. After the main generation pipeline produces documentation in the primary language (configured via `output.language`), this phase takes those pages and translates them into each secondary language defined in `output.secondary_languages`.
 
-- **增量翻譯**：預設跳過已存在的翻譯頁面，只翻譯新增或缺少的頁面
-- **並行處理**：使用 `errgroup` 與 semaphore（信號量）控制並行度，加速大型文件庫的翻譯
-- **目錄重建**：翻譯完成後自動重建翻譯語言的文件目錄，保持標題與目錄結構的一致性
-- **僅翻譯葉節點**：分類首頁（`HasChildren = true`）由系統自動產生，不需要 Claude 翻譯
+Key responsibilities:
 
-翻譯階段的輸出放置於 `.doc-build/{語言代碼}/` 子目錄，與主要語言的輸出並行存放。
+- **Page Translation**: Translates each leaf documentation page from the source language to target languages via Claude AI
+- **Category Title Translation**: Batch-translates category (parent section) titles in a single Claude call
+- **Catalog Reconstruction**: Builds a fully translated catalog structure for each target language
+- **Navigation Generation**: Produces localized `index.md`, `_sidebar.md`, and category index pages per language
+- **Viewer Regeneration**: Updates the static documentation viewer to include all available languages
+- **Incremental Skipping**: Skips pages that already have translations unless `--force` is specified
 
-### 關鍵術語
+The translated output for each language is written to a subdirectory under the documentation output directory (e.g., `.doc-build/en-US/`, `.doc-build/ja-JP/`).
 
-| 術語 | 說明 |
-|------|------|
-| 主要語言（source language）| `output.language` 設定的語言，即原始文件的語言 |
-| 次要語言（secondary languages）| `output.secondary_languages` 設定的目標翻譯語言列表 |
-| 葉節點（leaf item）| 目錄中沒有子項目的終端頁面，即實際文件內容頁面 |
-| `langWriter` | 指向語言子目錄的 `output.Writer`，透過 `ForLanguage()` 建立 |
-
-## 架構
+## Architecture
 
 ```mermaid
 flowchart TD
-    CLI["cmd/translate.go\nrunTranslate()"]
-    Gen["Generator\nTranslate()"]
-    CatReader["output.Writer\nReadCatalogJSON()"]
-    CatParser["catalog.Parse()"]
-    Flatten["catalog.Flatten()"]
-    LangWriter["output.Writer\nForLanguage(lang)"]
-    TranslatePages["Generator\ntranslatePages()"]
-    PromptEngine["prompt.Engine\nRenderTranslate()"]
-    ClaudeRunner["claude.Runner\nRunWithRetry()"]
-    ExtractDoc["claude.ExtractDocumentTag()"]
-    ExtractTitle["extractTitle()"]
-    BuildCat["buildTranslatedCatalog()"]
+    CLI["cmd/translate.go\n(CLI Entry Point)"]
+    Gen["Generator.Translate()"]
+    TP["translatePages()"]
+    TCT["translateCategoryTitles()"]
+    BTC["buildTranslatedCatalog()"]
     NavGen["output.GenerateIndex()\noutput.GenerateSidebar()\noutput.GenerateCategoryIndex()"]
-    ViewerGen["output.Writer\nWriteViewer()"]
+    Viewer["Writer.WriteViewer()"]
 
-    CLI -->|"TranslateOptions"| Gen
-    Gen --> CatReader
-    CatReader -->|"JSON string"| CatParser
-    CatParser -->|"*Catalog"| Flatten
-    Flatten -->|"[]FlatItem"| TranslatePages
-    Gen --> LangWriter
-    LangWriter --> TranslatePages
-    TranslatePages -->|"TranslatePromptData"| PromptEngine
-    PromptEngine -->|"rendered prompt"| ClaudeRunner
-    ClaudeRunner -->|"RunResult"| ExtractDoc
-    ExtractDoc -->|"translated content"| ExtractTitle
-    ExtractTitle -->|"translatedTitles map"| BuildCat
-    BuildCat -->|"*Catalog（翻譯版）"| NavGen
-    NavGen --> LangWriter
-    Gen --> ViewerGen
+    PE["prompt.Engine\nRenderTranslate()\nRenderTranslateTitles()"]
+    CR["claude.Runner\nRunWithRetry()"]
+    OW["output.Writer\nForLanguage()"]
+    Cat["catalog.Parse()\ncatalog.Catalog"]
+
+    CLI --> Gen
+    Gen --> Cat
+    Gen --> TP
+    Gen --> TCT
+    Gen --> BTC
+    Gen --> NavGen
+    Gen --> Viewer
+
+    TP --> PE
+    TP --> CR
+    TP --> OW
+    TCT --> PE
+    TCT --> CR
+    BTC --> Cat
 ```
 
-## 核心資料結構
+## Translation Pipeline
 
-### TranslateOptions
+The `Translate` method orchestrates the full translation workflow. It iterates over each target language sequentially, while parallelizing page translations within each language.
 
-翻譯執行時的設定選項，由 CLI 指令傳入：
-
-```go
-type TranslateOptions struct {
-    TargetLanguages []string
-    Force           bool
-    Concurrency     int
-}
-```
-
-> 來源：internal/generator/translate_phase.go#L21-L25
-
-### TranslatePromptData
-
-傳遞給翻譯 Prompt 模板的資料：
-
-```go
-type TranslatePromptData struct {
-    SourceLanguage     string // e.g., "zh-TW"
-    SourceLanguageName string // e.g., "繁體中文"
-    TargetLanguage     string // e.g., "en-US"
-    TargetLanguageName string // e.g., "English"
-    SourceContent      string // the full markdown content to translate
-}
-```
-
-> 來源：internal/prompt/engine.go#L98-L104
-
-## 核心流程
-
-### Translate() — 主流程
+### Main Workflow
 
 ```mermaid
 sequenceDiagram
-    participant CLI as selfmd translate
-    participant G as Generator
-    participant W as Writer
-    participant Cat as catalog
-    participant Nav as output
+    participant CLI as cmd/translate.go
+    participant Gen as Generator
+    participant Cat as Catalog
+    participant TP as translatePages
+    participant TCT as translateCategoryTitles
+    participant BTC as buildTranslatedCatalog
+    participant Nav as Navigation Gen
+    participant Viewer as Viewer Gen
 
-    CLI->>G: Translate(ctx, opts)
-    G->>W: ReadCatalogJSON()
-    W-->>G: JSON string
-    G->>Cat: Parse(json)
-    Cat-->>G: *Catalog
-    G->>Cat: Flatten()
-    Cat-->>G: []FlatItem
+    CLI->>Gen: Translate(ctx, opts)
+    Gen->>Cat: ReadCatalogJSON() + Parse()
+    Gen->>Gen: Flatten catalog items
 
-    loop 每個目標語言
-        G->>W: ForLanguage(targetLang)
-        W-->>G: langWriter
-        G->>G: translatePages(ctx, items, langWriter, ...)
-        Note over G: 並行翻譯所有葉節點頁面
-        G->>G: buildTranslatedCatalog(cat, translatedTitles)
-        G->>Nav: GenerateIndex(projectName, desc, translatedCat, lang)
-        G->>Nav: GenerateSidebar(projectName, translatedCat, lang)
-        G->>Nav: GenerateCategoryIndex(item, children, lang)
+    loop For each target language
+        Gen->>Gen: Writer.ForLanguage(targetLang)
+        Gen->>TP: translatePages(items, ...)
+        TP-->>Gen: translatedTitles map
+        Gen->>TCT: translateCategoryTitles(items, ...)
+        TCT-->>Gen: categoryTitles map
+        Gen->>BTC: buildTranslatedCatalog(cat, titles)
+        BTC-->>Gen: translatedCatalog
+        Gen->>Nav: GenerateIndex + GenerateSidebar
+        Gen->>Nav: GenerateCategoryIndex (per category)
     end
 
-    G->>W: WriteViewer(projectName, docMeta)
+    Gen->>Viewer: WriteViewer(projectName, docMeta)
 ```
 
-### translatePages() — 並行翻譯
+### Entry Point
 
-`translatePages()` 只處理葉節點頁面（`HasChildren == false`），使用 `errgroup` 與 semaphore 進行並行控制：
+The `Translate` function is invoked from the `selfmd translate` CLI command. It loads the existing master catalog, determines the source and target languages, then processes each target language in sequence.
 
 ```go
+func (g *Generator) Translate(ctx context.Context, opts TranslateOptions) error {
+	start := time.Now()
+
+	// Read master catalog
+	catJSON, err := g.Writer.ReadCatalogJSON()
+	if err != nil {
+		return fmt.Errorf("failed to read catalog (please run selfmd generate first): %w", err)
+	}
+
+	cat, err := catalog.Parse(catJSON)
+	if err != nil {
+		return fmt.Errorf("failed to parse catalog: %w", err)
+	}
+
+	items := cat.Flatten()
+	sourceLang := g.Config.Output.Language
+	sourceLangName := config.GetLangNativeName(sourceLang)
+```
+
+> Source: internal/generator/translate_phase.go#L29-L46
+
+## TranslateOptions
+
+The `TranslateOptions` struct configures the behavior of a translation run:
+
+```go
+type TranslateOptions struct {
+	TargetLanguages []string
+	Force           bool
+	Concurrency     int
+}
+```
+
+> Source: internal/generator/translate_phase.go#L22-L26
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `TargetLanguages` | `[]string` | List of language codes to translate into (e.g., `["en-US", "ja-JP"]`) |
+| `Force` | `bool` | When `true`, re-translates pages that already exist |
+| `Concurrency` | `int` | Maximum number of concurrent Claude calls for page translation |
+
+These options are populated from CLI flags in `cmd/translate.go`:
+
+```go
+translateCmd.Flags().StringSliceVar(&translateLangs, "lang", nil, "only translate specified languages (default: all secondary languages)")
+translateCmd.Flags().BoolVar(&translateForce, "force", false, "force re-translate existing files")
+translateCmd.Flags().IntVar(&translateConc, "concurrency", 0, "concurrency (override config)")
+```
+
+> Source: cmd/translate.go#L33-L35
+
+## Core Processes
+
+### Page Translation (`translatePages`)
+
+The `translatePages` function handles concurrent translation of all leaf (non-category) documentation pages. It uses Go's `errgroup` with a semaphore channel to control concurrency.
+
+```mermaid
+flowchart TD
+    Start["translatePages()"]
+    Filter["Filter leaf items\n(exclude categories)"]
+    Loop["For each leaf item\n(concurrent via errgroup)"]
+    Check{"Page exists\nand !Force?"}
+    Skip["Skip + extract\nexisting title"]
+    ReadSrc["Read source page\nfrom primary lang"]
+    Render["Engine.RenderTranslate()\nwith TranslatePromptData"]
+    Call["Runner.RunWithRetry()"]
+    Extract["claude.ExtractDocumentTag()"]
+    Title["extractTitle() from\ntranslated content"]
+    Write["langWriter.WritePage()"]
+    Done["Return translatedTitles map"]
+
+    Start --> Filter
+    Filter --> Loop
+    Loop --> Check
+    Check -->|Yes| Skip
+    Check -->|No| ReadSrc
+    ReadSrc --> Render
+    Render --> Call
+    Call --> Extract
+    Extract --> Title
+    Title --> Write
+    Write --> Done
+    Skip --> Done
+```
+
+Key implementation details:
+
+1. **Leaf-only filtering**: Only pages without children are translated; category pages get separate title translation.
+2. **Skip logic**: If a translated page already exists and `Force` is `false`, the page is skipped. The existing title is extracted for catalog building.
+3. **Concurrency control**: A semaphore channel (`sem`) limits parallel Claude calls to `opts.Concurrency`.
+4. **Error resilience**: Individual page failures are logged but do not abort the entire run. Atomic counters track success, failure, and skip counts.
+
+```go
+// Only translate leaf items (non-category pages)
+var leafItems []catalog.FlatItem
+for _, item := range items {
+	if !item.HasChildren {
+		leafItems = append(leafItems, item)
+	}
+}
+
 eg, ctx := errgroup.WithContext(ctx)
 sem := make(chan struct{}, opts.Concurrency)
-
-for _, item := range leafItems {
-    item := item
-    eg.Go(func() error {
-        // Skip if already translated and not forcing
-        if !opts.Force && langWriter.PageExists(item) {
-            skipped.Add(1)
-            // ...
-            return nil
-        }
-
-        sem <- struct{}{}
-        defer func() { <-sem }()
-
-        // Read source content
-        sourceContent, err := g.Writer.ReadPage(item)
-        // ...
-
-        // Render translate prompt
-        data := prompt.TranslatePromptData{ /* ... */ }
-        rendered, err := g.Engine.RenderTranslate(data)
-
-        // Call Claude
-        result, err := g.Runner.RunWithRetry(ctx, claude.RunOptions{
-            Prompt:  rendered,
-            WorkDir: g.RootDir,
-        })
-
-        // Extract translated content
-        content, err := claude.ExtractDocumentTag(result.Content)
-        // ...
-
-        // Write translated page
-        langWriter.WritePage(item, content)
-        return nil
-    })
-}
-eg.Wait()
 ```
 
-> 來源：internal/generator/translate_phase.go#L150-L249
+> Source: internal/generator/translate_phase.go#L153-L162
 
-### 翻譯跳過邏輯
+### Prompt Rendering
 
-當 `--force` 未指定時，若目標語言目錄中已存在對應的翻譯檔案，該頁面將被跳過。跳過時仍會嘗試從既有翻譯中提取標題，確保翻譯目錄的完整性：
+Each page translation uses the `TranslatePromptData` struct to render the `translate.tmpl` shared template:
 
 ```go
-if !opts.Force && langWriter.PageExists(item) {
-    skipped.Add(1)
-    // Try to extract title from existing translation
-    if content, err := langWriter.ReadPage(item); err == nil {
-        if title := extractTitle(content); title != "" {
-            titlesMu.Lock()
-            translatedTitles[item.Path] = title
-            titlesMu.Unlock()
-        }
-    }
-    fmt.Printf("      [跳過] %s（已存在）\n", item.Title)
-    return nil
+data := prompt.TranslatePromptData{
+	SourceLanguage:     sourceLang,
+	SourceLanguageName: sourceLangName,
+	TargetLanguage:     targetLang,
+	TargetLanguageName: targetLangName,
+	SourceContent:      sourceContent,
 }
+
+rendered, err := g.Engine.RenderTranslate(data)
 ```
 
-> 來源：internal/generator/translate_phase.go#L157-L169
+> Source: internal/generator/translate_phase.go#L197-L206
 
-## 翻譯目錄重建
+The `translate.tmpl` template instructs Claude to:
 
-翻譯完成後，系統會用收集到的翻譯標題（`translatedTitles` map）重建翻譯語言的 `Catalog`，再用此目錄產生導航結構：
+- Preserve all Markdown formatting, links, code blocks, and Mermaid diagrams
+- Keep code identifiers, file paths, and source annotations unchanged
+- Translate section headings and prose naturally
+- Return the result wrapped in `<document>` tags
 
 ```go
-// buildTranslatedCatalog creates a copy of the catalog with translated titles.
-func buildTranslatedCatalog(original *catalog.Catalog, translatedTitles map[string]string) *catalog.Catalog {
-    translated := &catalog.Catalog{
-        Items: translateCatalogItems(original.Items, translatedTitles, ""),
-    }
-    return translated
-}
-```
-
-> 來源：internal/generator/translate_phase.go#L276-L282
-
-`translateCatalogItems()` 以遞迴方式走訪所有目錄項目，若某個 `dotPath`（如 `core-modules.scanner`）在 `translatedTitles` 中有對應的翻譯標題，則使用翻譯後的標題：
-
-```go
-// Use translated title if available
-if translatedTitle, ok := titles[dotPath]; ok {
-    result[i].Title = translatedTitle
-}
-```
-
-> 來源：internal/generator/translate_phase.go#L298-L300
-
-## 翻譯 Prompt 模板
-
-翻譯使用共用模板（`templates/translate.tmpl`），不依賴語言特定的子資料夾，確保翻譯指令的語言無關性：
-
-```
-You are a professional technical documentation translator. Your task is to translate
-the following documentation page from {{.SourceLanguageName}} ({{.SourceLanguage}})
-to {{.TargetLanguageName}} ({{.TargetLanguage}}).
-
-## Translation Rules
-1. Preserve all Markdown formatting
-2. Do not translate code — code identifiers, file paths remain as-is
-3. Translate section headings
-4. Preserve relative links — only translate display text
-5. Preserve Mermaid diagrams — translate labels but keep syntax correct
-6. Preserve source annotations
-7. Natural translation — produce fluent {{.TargetLanguageName}}
-8. Preserve reference file tables — translate headers but keep paths
-```
-
-> 來源：internal/prompt/templates/translate.tmpl#L1-L35
-
-`Engine.RenderTranslate()` 使用 `renderShared()` 而非 `render()`，因此模板從共用的 `sharedTemplates` 而非語言特定的 `templates` 執行：
-
-```go
+// RenderTranslate renders the translation prompt.
 func (e *Engine) RenderTranslate(data TranslatePromptData) (string, error) {
-    return e.renderShared("translate.tmpl", data)
+	return e.renderShared("translate.tmpl", data)
 }
 ```
 
-> 來源：internal/prompt/engine.go#L132-L134
+> Source: internal/prompt/engine.go#L141-L143
 
-## 輸出結構
+### Response Extraction
 
-翻譯完成後，每個次要語言的輸出放置於 `.doc-build/{lang}/`：
+After Claude returns a response, the translated content is extracted from `<document>` tags using `claude.ExtractDocumentTag()`:
 
-```
-.doc-build/
-├── index.md            # 主要語言首頁
-├── _sidebar.md         # 主要語言側欄
-├── _catalog.json       # 主要語言目錄 JSON
-├── en-US/              # 次要語言目錄（例）
-│   ├── index.md        # 翻譯後首頁
-│   ├── _sidebar.md     # 翻譯後側欄
-│   ├── _catalog.json   # 翻譯後目錄 JSON（含翻譯標題）
-│   └── {section}/
-│       └── {page}/
-│           └── index.md   # 翻譯後的頁面
-└── index.html          # 瀏覽器入口（含所有語言資料）
+```go
+content, err := claude.ExtractDocumentTag(result.Content)
+if err != nil {
+	failed.Add(1)
+	fmt.Printf(" Failed (format error): %v\n", err)
+	return nil
+}
 ```
 
-`ForLanguage()` 方法建立指向語言子目錄的 Writer：
+> Source: internal/generator/translate_phase.go#L226-L231
+
+### Category Title Translation (`translateCategoryTitles`)
+
+Category titles (items with children) are batch-translated in a single Claude call for efficiency, rather than translating each one individually.
+
+```go
+func (g *Generator) translateCategoryTitles(
+	ctx context.Context,
+	items []catalog.FlatItem,
+	alreadyTranslated map[string]string,
+	sourceLang, sourceLangName, targetLang, targetLangName string,
+) (map[string]string, error) {
+```
+
+> Source: internal/generator/translate_phase.go#L296-L302
+
+The process:
+
+1. Collect all category items whose titles are not yet in the `alreadyTranslated` map
+2. Render the `translate_titles.tmpl` prompt with all titles as a batch
+3. Parse the Claude response as a JSON array of translated strings
+4. Validate that the response count matches the request count
+
+The `translate_titles.tmpl` template asks Claude to return a JSON array:
+
+```
+## Rules
+
+1. Translate each title naturally into {{.TargetLanguageName}}
+2. Keep technical terms, product names, and proper nouns as-is (e.g., "Git", "CLI", "API")
+3. Return ONLY a JSON array of translated titles in the same order, no other text
+```
+
+> Source: internal/prompt/templates/translate_titles.tmpl#L9-L13
+
+### Translated Catalog Building
+
+The `buildTranslatedCatalog` function creates a deep copy of the original catalog with translated titles substituted:
+
+```go
+func buildTranslatedCatalog(original *catalog.Catalog, translatedTitles map[string]string) *catalog.Catalog {
+	translated := &catalog.Catalog{
+		Items: translateCatalogItems(original.Items, translatedTitles, ""),
+	}
+	return translated
+}
+```
+
+> Source: internal/generator/translate_phase.go#L288-L293
+
+The recursive helper `translateCatalogItems` walks the catalog tree, replacing each item's title with its translated version when available:
+
+```go
+func translateCatalogItems(items []catalog.CatalogItem, titles map[string]string, parentPath string) []catalog.CatalogItem {
+	result := make([]catalog.CatalogItem, len(items))
+	for i, item := range items {
+		dotPath := item.Path
+		if parentPath != "" {
+			dotPath = parentPath + "." + item.Path
+		}
+
+		result[i] = catalog.CatalogItem{
+			Title:    item.Title,
+			Path:     item.Path,
+			Order:    item.Order,
+			Children: translateCatalogItems(item.Children, titles, dotPath),
+		}
+
+		// Use translated title if available
+		if translatedTitle, ok := titles[dotPath]; ok {
+			result[i].Title = translatedTitle
+		}
+	}
+	return result
+}
+```
+
+> Source: internal/generator/translate_phase.go#L382-L403
+
+### Navigation and Viewer Generation
+
+After all pages and titles are translated, the phase generates localized navigation files:
+
+```go
+// Generate translated index and sidebar
+indexContent := output.GenerateIndex(
+	g.Config.Project.Name,
+	g.Config.Project.Description,
+	translatedCat,
+	targetLang,
+)
+if err := langWriter.WriteFile("index.md", indexContent); err != nil {
+	g.Logger.Warn("failed to write translated index", "lang", targetLang, "error", err)
+}
+
+sidebarContent := output.GenerateSidebar(g.Config.Project.Name, translatedCat, targetLang)
+```
+
+> Source: internal/generator/translate_phase.go#L79-L89
+
+Category index pages are also regenerated for translated items. Finally, the documentation viewer is rebuilt to incorporate all available languages:
+
+```go
+docMeta := g.buildDocMeta()
+fmt.Println("Regenerating documentation viewer...")
+if err := g.Writer.WriteViewer(g.Config.Project.Name, docMeta); err != nil {
+	g.Logger.Warn("failed to generate viewer", "error", err)
+}
+```
+
+> Source: internal/generator/translate_phase.go#L118-L121
+
+## Language-Specific Output Structure
+
+The `Writer.ForLanguage()` method creates a sub-writer scoped to a language-specific subdirectory:
 
 ```go
 func (w *Writer) ForLanguage(lang string) *Writer {
-    return &Writer{
-        BaseDir: filepath.Join(w.BaseDir, lang),
-    }
+	return &Writer{
+		BaseDir: filepath.Join(w.BaseDir, lang),
+	}
 }
 ```
 
-> 來源：internal/output/writer.go#L139-L143
+> Source: internal/output/writer.go#L145-L149
 
-## 導航元件的本地化
+This produces a file layout like:
 
-翻譯後產生的 `index.md`、`_sidebar.md` 與分類索引頁使用 `output.UIStrings` 提供的語言特定 UI 字串：
-
-```go
-var UIStrings = map[string]map[string]string{
-    "zh-TW": {
-        "techDocs":        "技術文件",
-        "sectionContains": "本章節包含以下內容：",
-        // ...
-    },
-    "en-US": {
-        "techDocs":        "Technical Documentation",
-        "sectionContains": "This section contains the following:",
-        // ...
-    },
-}
+```
+.doc-build/
+├── _catalog.json          # Primary language catalog
+├── index.md               # Primary language index
+├── _sidebar.md            # Primary language sidebar
+├── overview/
+│   └── index.md
+├── en-US/                 # Translated language directory
+│   ├── _catalog.json      # Translated catalog
+│   ├── index.md           # Translated index
+│   ├── _sidebar.md        # Translated sidebar
+│   └── overview/
+│       └── index.md
+└── ja-JP/                 # Another translated language
+    ├── _catalog.json
+    └── ...
 ```
 
-> 來源：internal/output/navigation.go#L12-L27
+## Title Extraction Helper
 
-## 標題提取輔助函式
-
-`extractTitle()` 以正則表達式擷取 Markdown 文件的第一個 `#` 標題，用於收集翻譯後的頁面標題並重建翻譯目錄：
+The `extractTitle` function parses the first `#` heading from translated Markdown content to populate the translated titles map:
 
 ```go
 func extractTitle(content string) string {
-    re := regexp.MustCompile(`(?m)^#\s+(.+)$`)
-    match := re.FindStringSubmatch(content)
-    if len(match) >= 2 {
-        return strings.TrimSpace(match[1])
-    }
-    return ""
+	re := regexp.MustCompile(`(?m)^#\s+(.+)$`)
+	match := re.FindStringSubmatch(content)
+	if len(match) >= 2 {
+		return strings.TrimSpace(match[1])
+	}
+	return ""
 }
 ```
 
-> 來源：internal/generator/translate_phase.go#L267-L274
+> Source: internal/generator/translate_phase.go#L278-L285
 
-## CLI 使用範例
+This extracted title is used in two places:
+- When a page is freshly translated, the title from the output is captured
+- When an existing translation is skipped, the title is read from the existing file
 
-透過 `selfmd translate` 指令觸發翻譯階段：
+## Configuration
+
+Translation is configured in `selfmd.yaml` under the `output` section:
+
+| Config Key | Type | Description |
+|------------|------|-------------|
+| `output.language` | `string` | Primary (source) language code |
+| `output.secondary_languages` | `[]string` | Target languages for translation |
+| `claude.max_concurrent` | `int` | Default concurrency for Claude calls |
+
+Supported languages are defined in `config.KnownLanguages`:
 
 ```go
-var translateCmd = &cobra.Command{
-    Use:   "translate",
-    Short: "將主要語言文件翻譯為次要語言",
-    Long: `以已產生的主要語言文件為基準，翻譯為設定檔中定義的次要語言。
-翻譯結果放置於 .doc-build/{語言代碼}/ 子目錄。`,
-    RunE: runTranslate,
+var KnownLanguages = map[string]string{
+	"zh-TW": "繁體中文",
+	"zh-CN": "简体中文",
+	"en-US": "English",
+	"ja-JP": "日本語",
+	"ko-KR": "한국어",
+	"fr-FR": "Français",
+	"de-DE": "Deutsch",
+	"es-ES": "Español",
+	"pt-BR": "Português",
+	"th-TH": "ไทย",
+	"vi-VN": "Tiếng Việt",
 }
 ```
 
-> 來源：cmd/translate.go#L24-L30
+> Source: internal/config/config.go#L39-L51
 
-可用的旗標：
+## Related Links
 
-| 旗標 | 說明 |
-|------|------|
-| `--lang <code,...>` | 只翻譯指定語言（預設：所有次要語言） |
-| `--force` | 強制重新翻譯已存在的檔案 |
-| `--concurrency <n>` | 並行度（覆蓋設定檔中的 `max_concurrent`） |
+- [Documentation Generator](../index.md)
+- [Catalog Phase](../catalog-phase/index.md)
+- [Content Phase](../content-phase/index.md)
+- [Index Phase](../index-phase/index.md)
+- [translate Command](../../../cli/cmd-translate/index.md)
+- [Claude Runner](../../claude-runner/index.md)
+- [Prompt Engine](../../prompt-engine/index.md)
+- [Output Writer](../../output-writer/index.md)
+- [Output Language](../../../configuration/output-language/index.md)
+- [Translation Workflow](../../../i18n/translation-workflow/index.md)
+- [Supported Languages](../../../i18n/supported-languages/index.md)
 
-**前置條件**：必須先執行 `selfmd generate` 產生主要語言文件，翻譯階段依賴 `.doc-build/_catalog.json` 與原始頁面內容。
+## Reference Files
 
-## 相關連結
-
-- [selfmd translate](../../../cli/cmd-translate/index.md)
-- [文件產生管線](../index.md)
-- [索引與導航產生階段](../index-phase/index.md)
-- [多語言支援](../../../i18n/index.md)
-- [翻譯工作流程](../../../i18n/translation-workflow/index.md)
-- [支援的語言與模板](../../../i18n/supported-languages/index.md)
-- [Prompt 模板引擎](../../prompt-engine/index.md)
-- [Claude CLI 執行器](../../claude-runner/index.md)
-- [輸出寫入與連結修復](../../output-writer/index.md)
-
-## 參考檔案
-
-| 檔案路徑 | 說明 |
-|----------|------|
-| `internal/generator/translate_phase.go` | 翻譯階段核心實作：`Translate()`、`translatePages()`、`buildTranslatedCatalog()`、`extractTitle()` |
-| `internal/generator/pipeline.go` | `Generator` 結構定義與 `NewGenerator()`、`buildDocMeta()` |
-| `internal/prompt/engine.go` | `TranslatePromptData` 結構、`RenderTranslate()` 方法 |
-| `internal/prompt/templates/translate.tmpl` | 翻譯 Prompt 共用模板 |
-| `internal/output/writer.go` | `Writer`、`ForLanguage()`、`PageExists()`、`ReadPage()`、`WritePage()` |
-| `internal/output/navigation.go` | `UIStrings`、`GenerateIndex()`、`GenerateSidebar()`、`GenerateCategoryIndex()` |
-| `internal/catalog/catalog.go` | `Catalog`、`FlatItem`、`Flatten()`、`CatalogItem` |
-| `internal/config/config.go` | `OutputConfig`、`GetLangNativeName()`、`KnownLanguages` |
-| `cmd/translate.go` | `translate` CLI 指令實作 |
+| File Path | Description |
+|-----------|-------------|
+| `internal/generator/translate_phase.go` | Core translate phase implementation |
+| `internal/generator/pipeline.go` | Generator struct definition and main pipeline |
+| `cmd/translate.go` | CLI command entry point for translation |
+| `internal/prompt/engine.go` | Prompt template engine with translate rendering methods |
+| `internal/prompt/templates/translate.tmpl` | Page translation prompt template |
+| `internal/prompt/templates/translate_titles.tmpl` | Category title batch translation prompt template |
+| `internal/output/writer.go` | Output writer with language subdirectory support |
+| `internal/output/navigation.go` | Index, sidebar, and category index generation |
+| `internal/catalog/catalog.go` | Catalog data structures and flattening logic |
+| `internal/claude/runner.go` | Claude CLI runner with retry logic |
+| `internal/claude/parser.go` | Response parsing and document tag extraction |
+| `internal/config/config.go` | Configuration structs and language definitions |

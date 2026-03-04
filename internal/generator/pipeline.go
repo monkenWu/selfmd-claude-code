@@ -154,6 +154,11 @@ func (g *Generator) Generate(ctx context.Context, opts GenerateOptions) error {
 		fmt.Println("      Done, open .doc-build/index.html to browse")
 	}
 
+	// Write .nojekyll to prevent GitHub Pages from ignoring files starting with _
+	if err := g.Writer.WriteFile(".nojekyll", ""); err != nil {
+		g.Logger.Warn("failed to write .nojekyll", "error", err)
+	}
+
 	// Save current commit for incremental updates
 	if git.IsGitRepo(g.RootDir) {
 		if commit, err := git.GetCurrentCommit(g.RootDir); err == nil {

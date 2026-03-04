@@ -1,102 +1,106 @@
-# Prompt 模板引擎
+# Prompt Engine
 
-`prompt.Engine` 是 selfmd 的 Prompt 模板引擎，負責將結構化資料與預定義模板結合，產生傳遞給 Claude CLI 的完整提示詞（Prompt）。
+The Prompt Engine is the template rendering subsystem that transforms structured data into fully formed prompts for Claude AI, powering every phase of the documentation generation pipeline.
 
-## 概述
+## Overview
 
-Prompt 模板引擎位於 `internal/prompt/` 套件，核心職責有三：
+The Prompt Engine (`internal/prompt/engine.go`) serves as the bridge between selfmd's generation logic and the Claude AI model. It manages a collection of Go `text/template` files organized by language, renders them with phase-specific context data, and produces the final prompt strings that are sent to Claude via the Runner.
 
-1. **模板載入**：使用 Go 的 `embed.FS` 機制，在編譯時將 `templates/` 目錄下的所有 `.tmpl` 檔案嵌入二進位檔，確保部署時無需額外的模板檔案。
-2. **語言路由**：根據 `OutputConfig.GetEffectiveTemplateLang()` 決定載入哪一個語言子資料夾（`zh-TW` 或 `en-US`）的模板集。共用模板（`translate.tmpl`）則獨立管理，不隸屬於任何語言子資料夾。
-3. **資料渲染**：提供六個高階渲染方法，每個方法對應文件產生管線的一個特定階段，接受強型別的資料結構（Data Struct）並回傳渲染後的字串。
+**Key responsibilities:**
 
-在整體架構中，`Engine` 是 `Generator` 的核心依賴之一，與 `claude.Runner` 協作：`Engine` 負責「把資料轉成 Prompt 文字」，`Runner` 負責「把 Prompt 文字送給 Claude 並取得回應」。
+- **Template management** — Loads and parses embedded `.tmpl` files from language-specific and shared directories using Go's `embed.FS`
+- **Multi-language support** — Selects the appropriate template subfolder based on the configured output language (e.g., `zh-TW`, `en-US`), with fallback to `en-US` for unsupported languages
+- **Prompt rendering** — Provides typed render methods for each generation phase: catalog, content, update (matched/unmatched), and translation
+- **Data binding** — Accepts strongly-typed data structs that carry project metadata, scan results, catalog information, and language settings into each template
 
-### 關鍵術語
+The Engine is instantiated once per `Generator` and used throughout all pipeline phases.
 
-- **模板語言（Template Language）**：決定使用哪個語言資料夾下的 `.tmpl` 檔案，目前支援 `zh-TW` 與 `en-US`。
-- **語言覆寫（Language Override）**：當使用者設定的輸出語言沒有對應模板時（例如 `ja-JP`），引擎會退回使用英文模板（`en-US`），並在 Prompt 中加入明確指令，要求 Claude 以目標語言輸出。
-- **共用模板（Shared Template）**：`translate.tmpl` 不依賴特定語言，可翻譯任意語言組合，因此獨立於語言子資料夾外載入。
-
-## 架構
-
-### 元件依賴關係
+## Architecture
 
 ```mermaid
 flowchart TD
-    Config["config.OutputConfig"]
-    Pipeline["generator.NewGenerator"]
-    Engine["prompt.Engine"]
-    LangTmpl["語言模板集\ntemplates/zh-TW/*.tmpl\ntemplates/en-US/*.tmpl"]
-    SharedTmpl["共用模板\ntemplates/translate.tmpl"]
-    EmbedFS["embed.FS\ntemplatFS"]
-
-    CatalogPhase["generator.GenerateCatalog"]
-    ContentPhase["generator.GenerateContent"]
-    TranslatePhase["generator.Translate"]
-    UpdaterPhase["generator.Updater"]
-
-    Config -->|"GetEffectiveTemplateLang()"| Pipeline
-    Pipeline -->|"prompt.NewEngine(templateLang)"| Engine
-    EmbedFS --> LangTmpl
-    EmbedFS --> SharedTmpl
-    LangTmpl --> Engine
-    SharedTmpl --> Engine
-
-    Engine -->|"RenderCatalog()"| CatalogPhase
-    Engine -->|"RenderContent()"| ContentPhase
-    Engine -->|"RenderTranslate()"| TranslatePhase
-    Engine -->|"RenderUpdateMatched()\nRenderUpdateUnmatched()"| UpdaterPhase
-```
-
-### 模板檔案組織
-
-```mermaid
-flowchart TD
-    subgraph FS["embed.FS：templateFS"]
-        subgraph ZhTW["templates/zh-TW/"]
-            z1["catalog.tmpl"]
-            z2["content.tmpl"]
-            z3["updater.tmpl"]
-            z4["update_matched.tmpl"]
-            z5["update_unmatched.tmpl"]
-        end
-        subgraph EnUS["templates/en-US/"]
-            e1["catalog.tmpl"]
-            e2["content.tmpl"]
-            e3["updater.tmpl"]
-            e4["update_matched.tmpl"]
-            e5["update_unmatched.tmpl"]
-        end
-        subgraph Shared["templates/（根目錄）"]
-            s1["translate.tmpl"]
-        end
+    Generator["Generator (pipeline.go)"] -->|"creates via NewEngine()"| Engine["prompt.Engine"]
+    Engine -->|"loads"| LangTemplates["Language Templates\n(templates/{lang}/*.tmpl)"]
+    Engine -->|"loads"| SharedTemplates["Shared Templates\n(templates/*.tmpl)"]
+    
+    subgraph LanguageSpecific["Language-Specific Templates"]
+        CatalogTmpl["catalog.tmpl"]
+        ContentTmpl["content.tmpl"]
+        UpdaterTmpl["updater.tmpl"]
+        UpdateMatchedTmpl["update_matched.tmpl"]
+        UpdateUnmatchedTmpl["update_unmatched.tmpl"]
     end
-
-    Engine_Lang["Engine.templates\n（語言模板集）"]
-    Engine_Shared["Engine.sharedTemplates\n（共用模板）"]
-
-    ZhTW --> Engine_Lang
-    EnUS --> Engine_Lang
-    Shared --> Engine_Shared
+    
+    subgraph Shared["Shared Templates"]
+        TranslateTmpl["translate.tmpl"]
+        TranslateTitlesTmpl["translate_titles.tmpl"]
+    end
+    
+    LangTemplates --> LanguageSpecific
+    SharedTemplates --> Shared
+    
+    Engine -->|"rendered prompt"| Runner["claude.Runner"]
+    Runner -->|"sends to"| Claude["Claude AI"]
 ```
 
-## 核心資料結構
+## Template Organization
 
-`Engine` 中定義了六個對應不同渲染場景的資料結構（Data Struct）：
+Templates are embedded into the binary at compile time using Go's `//go:embed` directive. They are organized into two categories:
+
+### Language-Specific Templates
+
+Located under `internal/prompt/templates/{lang}/`, where `{lang}` is a language code such as `zh-TW` or `en-US`. Each language folder contains identical template files with localized prompt instructions:
+
+| Template File | Render Method | Pipeline Phase | Purpose |
+|---|---|---|---|
+| `catalog.tmpl` | `RenderCatalog()` | Catalog Phase | Instructs Claude to analyze project structure and produce a documentation catalog |
+| `content.tmpl` | `RenderContent()` | Content Phase | Instructs Claude to write a single documentation page |
+| `updater.tmpl` | `RenderUpdater()` | Legacy Update | Full incremental update prompt (kept for reference) |
+| `update_matched.tmpl` | `RenderUpdateMatched()` | Update Phase | Asks Claude which existing pages need regeneration |
+| `update_unmatched.tmpl` | `RenderUpdateUnmatched()` | Update Phase | Asks Claude whether new pages are needed for unmatched files |
+
+### Shared Templates
+
+Located directly under `internal/prompt/templates/`, these templates are language-independent:
+
+| Template File | Render Method | Pipeline Phase | Purpose |
+|---|---|---|---|
+| `translate.tmpl` | `RenderTranslate()` | Translate Phase | Instructs Claude to translate a documentation page |
+| `translate_titles.tmpl` | `RenderTranslateTitles()` | Translate Phase | Batch-translates catalog category titles |
+
+### Template Language Selection
+
+The Engine selects which template subfolder to load based on `OutputConfig.GetEffectiveTemplateLang()`. If the configured output language has a built-in template folder (currently `zh-TW` and `en-US`), that folder is used. Otherwise, it falls back to `en-US` and sets a language override flag so the prompt explicitly instructs Claude to write in the desired language.
+
+```go
+func (o *OutputConfig) GetEffectiveTemplateLang() string {
+	for _, lang := range SupportedTemplateLangs {
+		if o.Language == lang {
+			return o.Language
+		}
+	}
+	return "en-US"
+}
+```
+
+> Source: internal/config/config.go#L58-L65
+
+## Data Structures
+
+The Engine defines a typed data struct for each prompt type. These structs carry all the context that templates need to produce a complete prompt.
 
 ### CatalogPromptData
 
-用於**目錄產生階段**，提供專案的完整掃描結果讓 Claude 分析並設計文件目錄。
+Used by `RenderCatalog()` during the catalog generation phase. Carries project metadata, scanned file tree, key files, entry points, and README content.
 
 ```go
 type CatalogPromptData struct {
 	RepositoryName       string
 	ProjectType          string
 	Language             string
-	LanguageName         string // native display name (e.g., "繁體中文")
-	LanguageOverride     bool   // true when template lang != output lang
-	LanguageOverrideName string // native name of the desired output language
+	LanguageName         string
+	LanguageOverride     bool
+	LanguageOverrideName string
 	KeyFiles             string
 	EntryPoints          string
 	FileTree             string
@@ -104,11 +108,11 @@ type CatalogPromptData struct {
 }
 ```
 
-> 來源：internal/prompt/engine.go#L40-L51
+> Source: internal/prompt/engine.go#L40-L51
 
 ### ContentPromptData
 
-用於**內容頁面產生階段**，指定要撰寫的頁面在目錄中的位置、可連結的頁面清單，以及更新情境下的現有內容。
+Used by `RenderContent()` to generate a single documentation page. Includes catalog path information, project directory, file tree, the full catalog link table, and optionally the existing content for update context.
 
 ```go
 type ContentPromptData struct {
@@ -119,216 +123,236 @@ type ContentPromptData struct {
 	LanguageOverrideName string
 	CatalogPath          string
 	CatalogTitle         string
-	CatalogDirPath       string // filesystem dir path of THIS item, e.g., "configuration/claude-config"
+	CatalogDirPath       string
 	ProjectDir           string
 	FileTree             string
-	CatalogTable         string // formatted table of all catalog items with their dir paths
-	ExistingContent      string // existing page content for update context (empty for new pages)
+	CatalogTable         string
+	ExistingContent      string
 }
 ```
 
-> 來源：internal/prompt/engine.go#L54-L67
+> Source: internal/prompt/engine.go#L54-L67
 
-### UpdateMatchedPromptData 與 UpdateUnmatchedPromptData
+### TranslatePromptData
 
-用於**增量更新階段**，分別處理「判斷哪些現有頁面需要重新產生」與「判斷是否需要新增頁面」兩個子任務。
+Used by `RenderTranslate()` to translate a documentation page between languages. Contains source/target language codes, display names, and the full source content.
+
+```go
+type TranslatePromptData struct {
+	SourceLanguage     string
+	SourceLanguageName string
+	TargetLanguage     string
+	TargetLanguageName string
+	SourceContent      string
+}
+```
+
+> Source: internal/prompt/engine.go#L98-L104
+
+### Update-Related Data Structs
+
+Two data structs support the incremental update workflow:
+
+- **`UpdateMatchedPromptData`** — Carries changed file list and affected page summaries for determining which existing pages need regeneration
+- **`UpdateUnmatchedPromptData`** — Carries unmatched changed files and the existing catalog for determining if new pages are needed
 
 ```go
 type UpdateMatchedPromptData struct {
 	RepositoryName string
 	Language       string
-	ChangedFiles   string // list of changed source files
-	AffectedPages  string // pages that reference these files (path + title + summary)
+	ChangedFiles   string
+	AffectedPages  string
 }
 
 type UpdateUnmatchedPromptData struct {
 	RepositoryName  string
 	Language        string
-	UnmatchedFiles  string // changed files not referenced in any existing doc
-	ExistingCatalog string // existing catalog JSON
-	CatalogTable    string // formatted link table of all pages
+	UnmatchedFiles  string
+	ExistingCatalog string
+	CatalogTable    string
 }
 ```
 
-> 來源：internal/prompt/engine.go#L81-L95
+> Source: internal/prompt/engine.go#L81-L95
 
-### TranslatePromptData
+## Core Processes
 
-用於**翻譯階段**，指定來源語言、目標語言，以及要翻譯的完整 Markdown 內容。
-
-```go
-type TranslatePromptData struct {
-	SourceLanguage     string // e.g., "zh-TW"
-	SourceLanguageName string // e.g., "繁體中文"
-	TargetLanguage     string // e.g., "en-US"
-	TargetLanguageName string // e.g., "English"
-	SourceContent      string // the full markdown content to translate
-}
-```
-
-> 來源：internal/prompt/engine.go#L98-L104
-
-## 模板語言選擇邏輯
-
-引擎的語言選擇由 `config.OutputConfig` 中的兩個方法控制：
-
-```go
-// SupportedTemplateLangs lists language codes that have built-in prompt template folders.
-var SupportedTemplateLangs = []string{"zh-TW", "en-US"}
-
-// GetEffectiveTemplateLang returns which template folder to load.
-// If Language has a built-in template set, returns it; otherwise falls back to "en-US".
-func (o *OutputConfig) GetEffectiveTemplateLang() string {
-	for _, lang := range SupportedTemplateLangs {
-		if o.Language == lang {
-			return o.Language
-		}
-	}
-	return "en-US"
-}
-
-// NeedsLanguageOverride returns true when the template language differs from Language,
-// meaning the prompt needs an explicit instruction to output in the configured language.
-func (o *OutputConfig) NeedsLanguageOverride() bool {
-	return o.GetEffectiveTemplateLang() != o.Language
-}
-```
-
-> 來源：internal/config/config.go#L53-L71
-
-當 `LanguageOverride` 為 `true` 時，模板會在 Prompt 中加入明確的語言指令，要求 Claude 以指定語言輸出，即使模板本身是英文撰寫的。
-
-## 核心流程
-
-### Engine 初始化與渲染流程
+The following sequence diagram shows how the Engine is used during the documentation generation pipeline:
 
 ```mermaid
 sequenceDiagram
-    participant Gen as generator.NewGenerator
-    participant Cfg as config.OutputConfig
-    participant Eng as prompt.NewEngine
-    participant FS as embed.FS
+    participant Gen as Generator
+    participant Eng as prompt.Engine
+    participant Tmpl as Go text/template
+    participant Run as claude.Runner
+    participant AI as Claude AI
 
-    Gen->>Cfg: GetEffectiveTemplateLang()
-    Cfg-->>Gen: templateLang（如 "zh-TW"）
-    Gen->>Eng: NewEngine(templateLang)
-    Eng->>FS: ParseFS("templates/zh-TW/*.tmpl")
-    FS-->>Eng: language-specific templates
-    Eng->>FS: ParseFS("templates/*.tmpl")
-    FS-->>Eng: shared templates（translate.tmpl）
-    Eng-->>Gen: *Engine
+    Note over Gen: Phase 2 - Catalog
+    Gen->>Eng: RenderCatalog(CatalogPromptData)
+    Eng->>Tmpl: ExecuteTemplate("catalog.tmpl", data)
+    Tmpl-->>Eng: rendered prompt string
+    Eng-->>Gen: prompt string
+    Gen->>Run: RunWithRetry(prompt)
+    Run->>AI: claude CLI subprocess
+    AI-->>Run: catalog JSON
+    Run-->>Gen: RunResult
 
-    Note over Gen: 文件產生階段開始
-
-    Gen->>Eng: RenderCatalog(data)
-    Eng->>Eng: render("catalog.tmpl", data)
-    Eng-->>Gen: rendered prompt string
-
-    Gen->>Eng: RenderContent(data)
-    Eng->>Eng: render("content.tmpl", data)
-    Eng-->>Gen: rendered prompt string
-
-    Gen->>Eng: RenderTranslate(data)
-    Eng->>Eng: renderShared("translate.tmpl", data)
-    Eng-->>Gen: rendered prompt string
+    Note over Gen: Phase 3 - Content (per page)
+    Gen->>Eng: RenderContent(ContentPromptData)
+    Eng->>Tmpl: ExecuteTemplate("content.tmpl", data)
+    Tmpl-->>Eng: rendered prompt string
+    Eng-->>Gen: prompt string
+    Gen->>Run: RunWithRetry(prompt)
+    Run->>AI: claude CLI subprocess
+    AI-->>Run: markdown document
+    Run-->>Gen: RunResult
 ```
 
-### 語言覆寫決策流程
+### Engine Initialization
 
-```mermaid
-flowchart TD
-    A["使用者設定 output.language\n（例：ja-JP）"]
-    B{"是否為支援的\n模板語言？\nSupportedTemplateLangs"}
-    C["使用對應語言模板\n（zh-TW 或 en-US）\nLanguageOverride = false"]
-    D["退回使用 en-US 模板\nLanguageOverride = true\nLanguageOverrideName = ja-JP"]
-    E["模板中加入語言覆寫指令\n要求 Claude 以目標語言輸出"]
-
-    A --> B
-    B -->|"是（zh-TW / en-US）"| C
-    B -->|"否"| D
-    D --> E
-```
-
-## 使用範例
-
-### 初始化 Engine
+The Engine is created once when a `Generator` is instantiated. It loads two sets of templates: language-specific and shared.
 
 ```go
-// NewGenerator creates a new Generator.
-func NewGenerator(cfg *config.Config, rootDir string, logger *slog.Logger) (*Generator, error) {
-	templateLang := cfg.Output.GetEffectiveTemplateLang()
-	engine, err := prompt.NewEngine(templateLang)
+func NewEngine(templateLang string) (*Engine, error) {
+	langGlob := fmt.Sprintf("templates/%s/*.tmpl", templateLang)
+	tmpl, err := template.New("").ParseFS(templateFS, langGlob)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load prompt templates (%s): %w", templateLang, err)
 	}
-	// ...
-	return &Generator{
-		// ...
-		Engine: engine,
+
+	shared, err := template.New("").ParseFS(templateFS, "templates/*.tmpl")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load shared templates: %w", err)
+	}
+
+	return &Engine{
+		templates:       tmpl,
+		sharedTemplates: shared,
 	}, nil
 }
 ```
 
-> 來源：internal/generator/pipeline.go#L35-L59
+> Source: internal/prompt/engine.go#L21-L37
 
-### 渲染目錄 Prompt
+### Template Rendering
+
+All render methods follow the same pattern: accept a typed data struct, execute the named template, and return the rendered string. Language-specific templates use the `render()` method while shared templates use `renderShared()`.
 
 ```go
-func (g *Generator) GenerateCatalog(ctx context.Context, scan *scanner.ScanResult) (*catalog.Catalog, error) {
-	langName := config.GetLangNativeName(g.Config.Output.Language)
-	data := prompt.CatalogPromptData{
-		RepositoryName:       g.Config.Project.Name,
-		ProjectType:          g.Config.Project.Type,
-		Language:             g.Config.Output.Language,
-		LanguageName:         langName,
-		LanguageOverride:     g.Config.Output.NeedsLanguageOverride(),
-		LanguageOverrideName: langName,
-		KeyFiles:             scan.KeyFiles(),
-		EntryPoints:          scan.EntryPointsFormatted(),
-		FileTree:             scanner.RenderTree(scan.Tree, 4),
-		ReadmeContent:        scan.ReadmeContent,
+func (e *Engine) render(name string, data any) (string, error) {
+	var buf bytes.Buffer
+	if err := e.templates.ExecuteTemplate(&buf, name, data); err != nil {
+		return "", fmt.Errorf("failed to render template %s: %w", name, err)
 	}
+	return buf.String(), nil
+}
 
-	rendered, err := g.Engine.RenderCatalog(data)
-	if err != nil {
-		return nil, err
+func (e *Engine) renderShared(name string, data any) (string, error) {
+	var buf bytes.Buffer
+	if err := e.sharedTemplates.ExecuteTemplate(&buf, name, data); err != nil {
+		return "", fmt.Errorf("failed to render shared template %s: %w", name, err)
 	}
-	// rendered 為完整的 Prompt 字串，傳遞給 claude.Runner
+	return buf.String(), nil
 }
 ```
 
-> 來源：internal/generator/catalog_phase.go#L16-L62
+> Source: internal/prompt/engine.go#L150-L164
 
-### 渲染翻譯 Prompt
+## Usage Examples
+
+### Catalog Phase Usage
+
+The `Generator.GenerateCatalog()` method populates a `CatalogPromptData` struct from scan results and config, then calls `Engine.RenderCatalog()`:
 
 ```go
+data := prompt.CatalogPromptData{
+	RepositoryName:       g.Config.Project.Name,
+	ProjectType:          g.Config.Project.Type,
+	Language:             g.Config.Output.Language,
+	LanguageName:         langName,
+	LanguageOverride:     g.Config.Output.NeedsLanguageOverride(),
+	LanguageOverrideName: langName,
+	KeyFiles:             scan.KeyFiles(),
+	EntryPoints:          scan.EntryPointsFormatted(),
+	FileTree:             scanner.RenderTree(scan.Tree, 4),
+	ReadmeContent:        scan.ReadmeContent,
+}
+
+rendered, err := g.Engine.RenderCatalog(data)
+```
+
+> Source: internal/generator/catalog_phase.go#L17-L31
+
+### Content Phase Usage
+
+Each documentation page is rendered with project context and catalog information:
+
+```go
+data := prompt.ContentPromptData{
+	RepositoryName:       g.Config.Project.Name,
+	Language:             g.Config.Output.Language,
+	LanguageName:         langName,
+	LanguageOverride:     g.Config.Output.NeedsLanguageOverride(),
+	LanguageOverrideName: langName,
+	CatalogPath:          item.Path,
+	CatalogTitle:         item.Title,
+	CatalogDirPath:       item.DirPath,
+	ProjectDir:           g.RootDir,
+	FileTree:             scanner.RenderTree(scan.Tree, 3),
+	CatalogTable:         catalogTable,
+	ExistingContent:      existingContent,
+}
+
+rendered, err := g.Engine.RenderContent(data)
+```
+
+> Source: internal/generator/content_phase.go#L91-L107
+
+### Translation Phase Usage
+
+Translation prompts use the shared template engine:
+
+```go
+data := prompt.TranslatePromptData{
+	SourceLanguage:     sourceLang,
+	SourceLanguageName: sourceLangName,
+	TargetLanguage:     targetLang,
+	TargetLanguageName: targetLangName,
+	SourceContent:      sourceContent,
+}
+
 rendered, err := g.Engine.RenderTranslate(data)
 ```
 
-> 來源：internal/generator/translate_phase.go#L195
+> Source: internal/generator/translate_phase.go#L197-L206
 
-## 相關連結
+## Related Links
 
-- [文件產生管線](../generator/index.md) — `Engine` 在四階段管線中的使用方式
-- [目錄產生階段](../generator/catalog-phase/index.md) — 使用 `RenderCatalog` 的詳細流程
-- [內容頁面產生階段](../generator/content-phase/index.md) — 使用 `RenderContent` 的詳細流程
-- [翻譯階段](../generator/translate-phase/index.md) — 使用 `RenderTranslate` 的詳細流程
-- [增量更新](../incremental-update/index.md) — 使用 `RenderUpdateMatched`、`RenderUpdateUnmatched` 的情境
-- [Claude CLI 執行器](../claude-runner/index.md) — 接收 `Engine` 渲染結果的下游元件
-- [多語言支援](../../i18n/index.md) — 語言覆寫機制的使用者端設定
+- [Claude Runner](../claude-runner/index.md) — The subprocess runner that executes rendered prompts via the Claude CLI
+- [Documentation Generator](../generator/index.md) — The pipeline orchestrator that uses the Engine across all phases
+- [Catalog Phase](../generator/catalog-phase/index.md) — The phase that uses `RenderCatalog()` to generate documentation structure
+- [Content Phase](../generator/content-phase/index.md) — The phase that uses `RenderContent()` to generate individual pages
+- [Translate Phase](../generator/translate-phase/index.md) — The phase that uses `RenderTranslate()` and `RenderTranslateTitles()`
+- [Incremental Update Engine](../incremental-update/index.md) — The update workflow using `RenderUpdateMatched()` and `RenderUpdateUnmatched()`
+- [Configuration Overview](../../configuration/config-overview/index.md) — Language and template configuration settings
+- [Output Language](../../configuration/output-language/index.md) — Output language configuration that affects template selection
 
-## 參考檔案
+## Reference Files
 
-| 檔案路徑 | 說明 |
-|----------|------|
-| `internal/prompt/engine.go` | `Engine` 結構、資料型別定義與渲染方法 |
-| `internal/prompt/templates/zh-TW/catalog.tmpl` | 繁體中文目錄產生 Prompt 模板 |
-| `internal/prompt/templates/zh-TW/content.tmpl` | 繁體中文內容頁面產生 Prompt 模板 |
-| `internal/prompt/templates/zh-TW/updater.tmpl` | 繁體中文增量更新（legacy）Prompt 模板 |
-| `internal/prompt/templates/zh-TW/update_matched.tmpl` | 繁體中文：判斷現有頁面是否需重新產生的 Prompt 模板 |
-| `internal/prompt/templates/zh-TW/update_unmatched.tmpl` | 繁體中文：判斷是否需新增頁面的 Prompt 模板 |
-| `internal/prompt/templates/translate.tmpl` | 共用翻譯 Prompt 模板（語言無關） |
-| `internal/prompt/templates/en-US/catalog.tmpl` | 英文目錄產生 Prompt 模板 |
-| `internal/config/config.go` | `OutputConfig.GetEffectiveTemplateLang()`、`NeedsLanguageOverride()` 與 `SupportedTemplateLangs` 定義 |
-| `internal/generator/pipeline.go` | `Generator` 結構定義與 `NewGenerator` 初始化邏輯 |
-| `internal/generator/catalog_phase.go` | `GenerateCatalog`：使用 `RenderCatalog` 的範例 |
+| File Path | Description |
+|-----------|-------------|
+| `internal/prompt/engine.go` | Engine struct, data types, and render methods |
+| `internal/prompt/templates/en-US/catalog.tmpl` | English catalog generation prompt template |
+| `internal/prompt/templates/en-US/content.tmpl` | English content page generation prompt template |
+| `internal/prompt/templates/en-US/update_matched.tmpl` | English prompt for determining pages needing regeneration |
+| `internal/prompt/templates/en-US/update_unmatched.tmpl` | English prompt for determining new pages needed |
+| `internal/prompt/templates/en-US/updater.tmpl` | Legacy incremental update prompt template |
+| `internal/prompt/templates/translate.tmpl` | Shared translation prompt template |
+| `internal/prompt/templates/translate_titles.tmpl` | Shared batch title translation prompt template |
+| `internal/prompt/templates/zh-TW/catalog.tmpl` | Traditional Chinese catalog prompt (verified exists) |
+| `internal/generator/pipeline.go` | Generator struct definition and Engine initialization |
+| `internal/generator/catalog_phase.go` | Catalog phase using RenderCatalog() |
+| `internal/generator/content_phase.go` | Content phase using RenderContent() |
+| `internal/generator/translate_phase.go` | Translation phase using RenderTranslate() and RenderTranslateTitles() |
+| `internal/generator/updater.go` | Update workflow using RenderUpdateMatched() and RenderUpdateUnmatched() |
+| `internal/config/config.go` | GetEffectiveTemplateLang() and language configuration |

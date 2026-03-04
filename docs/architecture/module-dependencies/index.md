@@ -1,461 +1,565 @@
-# 模組依賴關係
+# Module Dependencies
 
-selfmd 採用清晰的分層架構，各模組間的依賴關係呈現單向流動，從基礎層向上至協調層與 CLI 層，避免循環依賴。
+A comprehensive analysis of the internal module dependency graph in selfmd, showing how each package relates to and depends on others.
 
-## 概述
+## Overview
 
-selfmd 的模組依賴關係可分為四個明確的層次：
+selfmd is organized as a Go project following the standard `cmd/` + `internal/` layout. The `cmd/` package defines CLI entry points, while `internal/` contains all core business logic split across eight specialized packages. Understanding these dependency relationships is essential for navigating the codebase, planning changes, and avoiding circular imports.
 
-1. **基礎層**（Foundation）：不依賴任何專案內部套件，僅使用標準函式庫或第三方套件
-2. **中間層**（Middleware）：僅依賴基礎層模組
-3. **協調層**（Orchestration）：`generator` 套件，依賴所有中間層與基礎層模組，負責整合各階段
-4. **CLI 層**（Entry Points）：`cmd` 套件，依賴協調層與部分基礎層模組，提供使用者介面
+The architecture follows a layered design where:
+- **Foundation modules** (`config`, `catalog`, `git`, `prompt`, `scanner`) have minimal internal dependencies
+- **Infrastructure modules** (`claude`, `output`) depend on foundation modules
+- **Orchestration modules** (`generator`) aggregate multiple foundation and infrastructure modules
+- **Entry point layer** (`cmd`) wires everything together via the generator
 
-此設計確保模組間**無循環依賴**，低層模組對高層模組一無所知，測試與替換各模組的成本極低。
+## Architecture
 
-### 關鍵術語
-
-| 術語 | 說明 |
-|------|------|
-| 基礎層 | 零內部依賴的純函式套件 |
-| 協調層 | 整合多個模組、執行完整工作流程的套件 |
-| 依賴注入 | `Generator` struct 在建構時接收 `Runner`、`Engine`、`Writer` 實體 |
-
----
-
-## 架構
-
-### 整體依賴層次圖
+### Full Module Dependency Graph
 
 ```mermaid
 flowchart TD
-    subgraph CLI["CLI 層（cmd/）"]
-        cmd_root["root.go"]
-        cmd_init["init.go"]
-        cmd_gen["generate.go"]
-        cmd_update["update.go"]
-        cmd_translate["translate.go"]
-    end
+    main["main.go"]
+    cmd_root["cmd/root"]
+    cmd_generate["cmd/generate"]
+    cmd_init["cmd/init"]
+    cmd_update["cmd/update"]
+    cmd_translate["cmd/translate"]
+    generator["internal/generator"]
+    config["internal/config"]
+    scanner["internal/scanner"]
+    catalog["internal/catalog"]
+    claude["internal/claude"]
+    prompt["internal/prompt"]
+    output["internal/output"]
+    gitpkg["internal/git"]
 
-    subgraph Orchestration["協調層（internal/generator/）"]
-        pipeline["pipeline.go<br/>Generator"]
-        catalog_phase["catalog_phase.go<br/>GenerateCatalog"]
-        content_phase["content_phase.go<br/>GenerateContent"]
-        index_phase["index_phase.go<br/>GenerateIndex"]
-        translate_phase["translate_phase.go<br/>Translate"]
-        updater["updater.go<br/>Update"]
-    end
-
-    subgraph Middleware["中間層（internal/）"]
-        claude["claude/<br/>Runner · Parser · Types"]
-        output_pkg["output/<br/>Writer · LinkFixer · Navigation"]
-        scanner_pkg["scanner/<br/>Scanner · FileTree"]
-    end
-
-    subgraph Foundation["基礎層（internal/）"]
-        config_pkg["config/<br/>Config"]
-        catalog_pkg["catalog/<br/>Catalog"]
-        prompt_pkg["prompt/<br/>Engine"]
-        git_pkg["git/<br/>Git"]
-    end
-
-    cmd_gen --> pipeline
-    cmd_update --> pipeline
-    cmd_update --> git_pkg
-    cmd_update --> scanner_pkg
-    cmd_translate --> pipeline
-    cmd_init --> config_pkg
-    cmd_gen --> claude
+    main --> cmd_root
+    cmd_generate --> config
+    cmd_generate --> claude
+    cmd_generate --> generator
+    cmd_init --> config
+    cmd_update --> config
     cmd_update --> claude
+    cmd_update --> generator
+    cmd_update --> gitpkg
+    cmd_update --> scanner
+    cmd_translate --> config
     cmd_translate --> claude
+    cmd_translate --> generator
 
-    pipeline --> catalog_phase
-    pipeline --> content_phase
-    pipeline --> index_phase
-    pipeline --> translate_phase
-    pipeline --> updater
+    generator --> config
+    generator --> scanner
+    generator --> catalog
+    generator --> claude
+    generator --> prompt
+    generator --> output
+    generator --> gitpkg
 
-    catalog_phase --> claude
-    catalog_phase --> prompt_pkg
-    catalog_phase --> scanner_pkg
-    catalog_phase --> catalog_pkg
-
-    content_phase --> claude
-    content_phase --> prompt_pkg
-    content_phase --> scanner_pkg
-    content_phase --> catalog_pkg
-    content_phase --> output_pkg
-
-    index_phase --> catalog_pkg
-    index_phase --> output_pkg
-
-    translate_phase --> claude
-    translate_phase --> prompt_pkg
-    translate_phase --> catalog_pkg
-    translate_phase --> output_pkg
-
-    updater --> claude
-    updater --> prompt_pkg
-    updater --> scanner_pkg
-    updater --> catalog_pkg
-    updater --> output_pkg
-    updater --> git_pkg
-
-    claude --> config_pkg
-    scanner_pkg --> config_pkg
-    output_pkg --> catalog_pkg
+    scanner --> config
+    claude --> config
+    output --> catalog
 ```
 
-> 來源：`cmd/generate.go#L1-L14`、`cmd/update.go#L1-L18`、`internal/generator/pipeline.go#L1-L16`
+### Dependency Layers
 
----
+```mermaid
+flowchart BT
+    subgraph Layer0["Layer 0 — Zero Internal Dependencies"]
+        config["config"]
+        catalog["catalog"]
+        gitpkg["git"]
+        prompt["prompt"]
+    end
 
-## 各層詳細說明
+    subgraph Layer1["Layer 1 — Single Dependency"]
+        scanner["scanner"]
+        claude["claude"]
+    end
 
-### 基礎層（Foundation Layer）
+    subgraph Layer2["Layer 2 — Foundation Consumer"]
+        output["output"]
+    end
 
-基礎層模組彼此獨立，不相互依賴，可單獨測試與使用。
+    subgraph Layer3["Layer 3 — Orchestration"]
+        generator["generator"]
+    end
 
-#### `internal/config`
+    subgraph Layer4["Layer 4 — Entry Points"]
+        cmd["cmd/*"]
+    end
 
-**職責**：讀取、驗證、序列化 `selfmd.yaml` 設定檔，並提供 `DefaultConfig()`。
-
-- **內部依賴**：無
-- **外部依賴**：`gopkg.in/yaml.v3`
-- **被依賴於**：`claude`、`scanner`、`generator`（所有階段）、`cmd`
-
-```go
-type Config struct {
-    Project ProjectConfig `yaml:"project"`
-    Targets TargetsConfig `yaml:"targets"`
-    Output  OutputConfig  `yaml:"output"`
-    Claude  ClaudeConfig  `yaml:"claude"`
-    Git     GitConfig     `yaml:"git"`
-}
+    scanner --> config
+    claude --> config
+    output --> catalog
+    generator --> config
+    generator --> scanner
+    generator --> catalog
+    generator --> claude
+    generator --> prompt
+    generator --> output
+    generator --> gitpkg
+    cmd --> generator
+    cmd --> config
+    cmd --> claude
+    cmd --> scanner
+    cmd --> gitpkg
 ```
 
-> 來源：`internal/config/config.go#L11-L17`
+## Module Inventory
 
-#### `internal/catalog`
+### Foundation Modules (Layer 0)
 
-**職責**：定義文件目錄的資料模型（`Catalog`、`CatalogItem`、`FlatItem`），並提供 JSON 序列化與扁平化方法。
+These modules have **zero dependencies** on other `internal/` packages. They rely only on the Go standard library and external third-party packages.
 
-- **內部依賴**：無
-- **外部依賴**：標準函式庫（`encoding/json`）
-- **被依賴於**：`output`、`generator`（所有階段）
+| Module | Package | External Dependencies | Purpose |
+|--------|---------|----------------------|---------|
+| Config | `internal/config` | `gopkg.in/yaml.v3` | Configuration loading, validation, and defaults |
+| Catalog | `internal/catalog` | — | Documentation catalog tree parsing and traversal |
+| Git | `internal/git` | `doublestar/v4` | Git CLI wrapper for change detection |
+| Prompt | `internal/prompt` | — | Template engine using `embed.FS` |
+
+### Infrastructure Modules (Layer 1–2)
+
+These modules depend on one or more foundation modules.
+
+| Module | Package | Internal Dependencies | Purpose |
+|--------|---------|----------------------|---------|
+| Scanner | `internal/scanner` | `config` | Project file tree scanning with glob filtering |
+| Claude | `internal/claude` | `config` | Claude CLI subprocess management and retry logic |
+| Output | `internal/output` | `catalog` | File writing, link fixing, navigation generation, viewer bundling |
+
+### Orchestration Module (Layer 3)
+
+| Module | Package | Internal Dependencies | Purpose |
+|--------|---------|----------------------|---------|
+| Generator | `internal/generator` | `config`, `scanner`, `catalog`, `claude`, `prompt`, `output`, `git` | Pipeline orchestration across all generation phases |
+
+## Dependency Details by Module
+
+### `internal/config`
+
+The config package is the most depended-upon module — it has **zero internal dependencies** and is imported by five other packages.
 
 ```go
-type Catalog struct {
-    Items []CatalogItem `json:"items"`
-}
+package config
 
-type FlatItem struct {
-    Title       string
-    Path        string // dot-notation, e.g., "core-modules.authentication"
-    DirPath     string // filesystem path, e.g., "core-modules/authentication"
-    Depth       int
-    ParentPath  string
-    HasChildren bool
-}
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"gopkg.in/yaml.v3"
+)
 ```
 
-> 來源：`internal/catalog/catalog.go#L10-L31`
+> Source: internal/config/config.go#L1-L9
 
-#### `internal/prompt`
+**Depended on by:** `cmd/*`, `internal/scanner`, `internal/claude`, `internal/generator`
 
-**職責**：管理 Prompt 模板（`templates/zh-TW/*.tmpl`、`templates/en-US/*.tmpl`），提供各階段所需的渲染方法。
+### `internal/catalog`
 
-- **內部依賴**：無
-- **外部依賴**：標準函式庫（`text/template`、`embed`）
-- **被依賴於**：`generator`（所有使用 Claude 的階段）
+The catalog package is self-contained with no internal imports. It provides the `Catalog`, `CatalogItem`, and `FlatItem` types used across the system.
 
 ```go
-type Engine struct {
-    templates       *template.Template // 語言專屬模板
-    sharedTemplates *template.Template // 共用模板（translate.tmpl）
-}
+package catalog
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
 ```
 
-> 來源：`internal/prompt/engine.go#L13-L17`
+> Source: internal/catalog/catalog.go#L1-L8
 
-#### `internal/git`
+**Depended on by:** `internal/output`, `internal/generator`
 
-**職責**：封裝 Git CLI 操作（取得 commit、diff、過濾變更檔案），不解析業務邏輯。
+### `internal/scanner`
 
-- **內部依賴**：無
-- **外部依賴**：`github.com/bmatcuk/doublestar/v4`、標準函式庫（`os/exec`）
-- **被依賴於**：`generator/updater`、`generator/pipeline`、`cmd/update`
+The scanner depends only on `config` to access include/exclude glob patterns for file filtering.
 
 ```go
-type ChangedFile struct {
-    Status string // "M", "A", "D", "R"
-    Path   string
-}
+package scanner
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/bmatcuk/doublestar/v4"
+	"github.com/monkenwu/selfmd/internal/config"
+)
 ```
 
-> 來源：`internal/git/git.go#L47-L51`
+> Source: internal/scanner/scanner.go#L1-L10
 
----
+**Depended on by:** `cmd/update`, `internal/generator`
 
-### 中間層（Middleware Layer）
+### `internal/claude`
 
-中間層模組依賴基礎層，但彼此之間**不互相依賴**。
-
-#### `internal/claude`
-
-**職責**：封裝 Claude CLI 子行程的呼叫（`Runner`），解析 JSON 輸出（`Parser`），並定義資料型別（`Types`）。
-
-- **內部依賴**：`internal/config`（讀取 `ClaudeConfig`）
-- **外部依賴**：標準函式庫（`os/exec`、`encoding/json`、`regexp`）
+The claude package depends on `config` to read `ClaudeConfig` settings (model, timeout, retry count, allowed tools).
 
 ```go
+// Runner manages Claude CLI subprocess invocations.
 type Runner struct {
-    config *config.ClaudeConfig
-    logger *slog.Logger
+	config *config.ClaudeConfig
+	logger *slog.Logger
+}
+
+// NewRunner creates a new Claude CLI runner.
+func NewRunner(cfg *config.ClaudeConfig, logger *slog.Logger) *Runner {
+	return &Runner{
+		config: cfg,
+		logger: logger,
+	}
 }
 ```
 
-> 來源：`internal/claude/runner.go#L16-L19`
+> Source: internal/claude/runner.go#L16-L27
 
-`claude` 套件包含三個檔案，各有明確分工：
+**Depended on by:** `cmd/generate`, `cmd/update`, `cmd/translate`, `internal/generator`
 
-| 檔案 | 職責 |
-|------|------|
-| `runner.go` | 執行 `claude` CLI 子行程，支援重試 |
-| `parser.go` | 解析 JSON 回應、擷取 `<document>` 標籤、擷取 JSON 區塊 |
-| `types.go` | 定義 `RunOptions`、`RunResult`、`CLIResponse` |
+### `internal/prompt`
 
-#### `internal/scanner`
-
-**職責**：掃描專案目錄，依據 `Config.Targets` 過濾檔案，建構 `FileNode` 樹狀結構，讀取 README 與入口檔案。
-
-- **內部依賴**：`internal/config`（存取 `Targets.Include` / `Targets.Exclude`）
-- **外部依賴**：`github.com/bmatcuk/doublestar/v4`
+The prompt package has zero internal dependencies. It uses Go's `embed.FS` to bundle templates and renders them with the standard `text/template` library.
 
 ```go
-type ScanResult struct {
-    RootDir            string
-    Tree               *FileNode
-    FileList           []string
-    TotalFiles         int
-    TotalDirs          int
-    ReadmeContent      string
-    EntryPointContents map[string]string
+//go:embed templates/*/*.tmpl templates/*.tmpl
+var templateFS embed.FS
+
+// Engine renders prompt templates with context data.
+type Engine struct {
+	templates       *template.Template // language-specific templates
+	sharedTemplates *template.Template // shared templates (translate.tmpl)
 }
 ```
 
-> 來源：`internal/scanner/filetree.go#L18-L27`
+> Source: internal/prompt/engine.go#L10-L17
 
-#### `internal/output`
+**Depended on by:** `internal/generator`
 
-**職責**：將文件寫入磁碟（`Writer`），修復相對路徑連結（`LinkFixer`），產生導航頁面（`navigation.go`），以及靜態瀏覽器（`viewer.go`）。
+### `internal/output`
 
-- **內部依賴**：`internal/catalog`（存取 `FlatItem`、`Catalog`）
-- **外部依賴**：標準函式庫（`os`、`path/filepath`、`regexp`）
+The output package depends on `catalog` for type definitions used in file writing, link fixing, and navigation generation.
 
 ```go
-type Writer struct {
-    BaseDir string // absolute path to .doc-build/
-}
+// writer.go
+import (
+	"github.com/monkenwu/selfmd/internal/catalog"
+)
 
-type LinkFixer struct {
-    allItems  []catalog.FlatItem
-    dirPaths  map[string]bool
-    pathIndex map[string]string
-}
+// linkfixer.go
+import (
+	"github.com/monkenwu/selfmd/internal/catalog"
+)
+
+// navigation.go
+import (
+	"github.com/monkenwu/selfmd/internal/catalog"
+)
 ```
 
-> 來源：`internal/output/writer.go#L26-L28`、`internal/output/linkfixer.go#L12-L16`
+> Source: internal/output/writer.go#L9-L10, internal/output/linkfixer.go#L8-L9, internal/output/navigation.go#L8-L9
 
----
+The `Writer`, `LinkFixer`, and navigation functions all operate on `catalog.FlatItem` and `catalog.Catalog` types.
 
-### 協調層（Orchestration Layer）
+**Depended on by:** `internal/generator`
 
-`internal/generator` 是整個系統的核心協調層，負責將所有中間層與基礎層模組整合為完整的工作流程。
+### `internal/git`
 
-#### `Generator` struct 與依賴注入
+The git package has zero internal dependencies. It shells out to the `git` CLI and uses `doublestar` for file pattern matching in `FilterChangedFiles`.
+
+```go
+package git
+
+import (
+	"bytes"
+	"fmt"
+	"os/exec"
+	"strings"
+
+	"github.com/bmatcuk/doublestar/v4"
+)
+```
+
+> Source: internal/git/git.go#L1-L10
+
+**Depended on by:** `cmd/update`, `internal/generator`
+
+### `internal/generator`
+
+The generator is the **heaviest module** in terms of dependencies — it imports all seven other internal packages. This is by design, as it orchestrates the full pipeline.
+
+```go
+package generator
+
+import (
+	"github.com/monkenwu/selfmd/internal/catalog"
+	"github.com/monkenwu/selfmd/internal/claude"
+	"github.com/monkenwu/selfmd/internal/config"
+	"github.com/monkenwu/selfmd/internal/git"
+	"github.com/monkenwu/selfmd/internal/output"
+	"github.com/monkenwu/selfmd/internal/prompt"
+	"github.com/monkenwu/selfmd/internal/scanner"
+)
+```
+
+> Source: internal/generator/pipeline.go#L9-L16
+
+The `Generator` struct holds references to the key collaborators:
 
 ```go
 type Generator struct {
-    Config  *config.Config
-    Runner  *claude.Runner
-    Engine  *prompt.Engine
-    Writer  *output.Writer
-    Logger  *slog.Logger
-    RootDir string
-
-    TotalCost   float64
-    TotalPages  int
-    FailedPages int
+	Config  *config.Config
+	Runner  *claude.Runner
+	Engine  *prompt.Engine
+	Writer  *output.Writer
+	Logger  *slog.Logger
+	RootDir string
 }
 ```
 
-> 來源：`internal/generator/pipeline.go#L19-L31`
+> Source: internal/generator/pipeline.go#L19-L26
 
-`NewGenerator` 建構時統一初始化所有依賴：
+## Core Processes
 
-```go
-func NewGenerator(cfg *config.Config, rootDir string, logger *slog.Logger) (*Generator, error) {
-    templateLang := cfg.Output.GetEffectiveTemplateLang()
-    engine, err := prompt.NewEngine(templateLang)
-    // ...
-    runner := claude.NewRunner(&cfg.Claude, logger)
-    writer := output.NewWriter(absOutDir)
-    return &Generator{
-        Config:  cfg,
-        Runner:  runner,
-        Engine:  engine,
-        Writer:  writer,
-        Logger:  logger,
-        RootDir: rootDir,
-    }, nil
-}
-```
+### Generator Construction — Dependency Wiring
 
-> 來源：`internal/generator/pipeline.go#L34-L58`
-
-#### generator 各子檔案的依賴範圍
-
-```mermaid
-flowchart LR
-    subgraph generator["internal/generator/"]
-        pipeline["pipeline.go"]
-        catalog_p["catalog_phase.go"]
-        content_p["content_phase.go"]
-        index_p["index_phase.go"]
-        translate_p["translate_phase.go"]
-        updater["updater.go"]
-    end
-
-    catalog_p --> |"catalog, claude<br/>config, prompt, scanner"| deps1["基礎層＋中間層"]
-    content_p --> |"catalog, claude<br/>config, output, prompt, scanner"| deps1
-    index_p --> |"catalog, output"| deps2["輕量依賴"]
-    translate_p --> |"catalog, claude<br/>config, output, prompt"| deps1
-    updater --> |"catalog, claude<br/>git, output, prompt, scanner"| deps1
-    pipeline --> |"整合所有子模組"| deps1
-```
-
----
-
-### CLI 層（Entry Points Layer）
-
-`cmd` 套件的各指令直接依賴協調層，並視需求直接呼叫部分中間層（如 `claude.CheckAvailable()`）。
-
-```mermaid
-flowchart LR
-    cmd_init["cmd/init.go"] --> config["internal/config"]
-    cmd_gen["cmd/generate.go"] --> generator["internal/generator"]
-    cmd_gen --> claude["internal/claude"]
-    cmd_gen --> config
-    cmd_update["cmd/update.go"] --> generator
-    cmd_update --> claude
-    cmd_update --> config
-    cmd_update --> git["internal/git"]
-    cmd_update --> scanner["internal/scanner"]
-    cmd_translate["cmd/translate.go"] --> generator
-    cmd_translate --> claude
-    cmd_translate --> config
-```
-
-> 來源：`cmd/generate.go#L1-L14`、`cmd/update.go#L1-L18`、`cmd/translate.go#L1-L17`
-
----
-
-## 依賴矩陣
-
-下表列出各模組所依賴的其他**內部**模組（✓ 表示直接依賴）：
-
-| 模組 | config | catalog | prompt | git | scanner | claude | output | generator |
-|------|:------:|:-------:|:------:|:---:|:-------:|:------:|:------:|:---------:|
-| `config` | — | | | | | | | |
-| `catalog` | | — | | | | | | |
-| `prompt` | | | — | | | | | |
-| `git` | | | | — | | | | |
-| `scanner` | ✓ | | | | — | | | |
-| `claude` | ✓ | | | | | — | | |
-| `output` | | ✓ | | | | | — | |
-| `generator` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| `cmd` | ✓ | | | ✓ | ✓ | ✓ | | ✓ |
-
----
-
-## 核心流程：依賴初始化順序
+The `NewGenerator` factory function demonstrates how dependencies flow into the orchestrator:
 
 ```mermaid
 sequenceDiagram
-    participant Main as main.go
-    participant CMD as cmd/generate.go
-    participant CFG as config.Load()
-    participant Gen as generator.NewGenerator()
+    participant Cmd as cmd/generate
+    participant Config as config.Load()
     participant Engine as prompt.NewEngine()
     participant Runner as claude.NewRunner()
     participant Writer as output.NewWriter()
+    participant Gen as generator.NewGenerator()
 
-    Main->>CMD: Execute()
-    CMD->>CFG: config.Load(cfgFile)
-    CFG-->>CMD: *Config
-    CMD->>Gen: NewGenerator(cfg, rootDir, logger)
-    Gen->>Engine: prompt.NewEngine(templateLang)
+    Cmd->>Config: Load(cfgFile)
+    Config-->>Cmd: *Config
+    Cmd->>Gen: NewGenerator(cfg, rootDir, logger)
+    Gen->>Engine: NewEngine(templateLang)
     Engine-->>Gen: *Engine
-    Gen->>Runner: claude.NewRunner(&cfg.Claude, logger)
+    Gen->>Runner: NewRunner(&cfg.Claude, logger)
     Runner-->>Gen: *Runner
-    Gen->>Writer: output.NewWriter(outDir)
+    Gen->>Writer: NewWriter(cfg.Output.Dir)
     Writer-->>Gen: *Writer
-    Gen-->>CMD: *Generator
-    CMD->>Gen: gen.Generate(ctx, opts)
+    Gen-->>Cmd: *Generator
 ```
 
----
+```go
+func NewGenerator(cfg *config.Config, rootDir string, logger *slog.Logger) (*Generator, error) {
+	templateLang := cfg.Output.GetEffectiveTemplateLang()
+	engine, err := prompt.NewEngine(templateLang)
+	if err != nil {
+		return nil, err
+	}
 
-## 外部依賴彙整
+	runner := claude.NewRunner(&cfg.Claude, logger)
 
-selfmd 使用以下第三方套件：
+	absOutDir := cfg.Output.Dir
+	if absOutDir == "" {
+		absOutDir = ".doc-build"
+	}
 
-| 套件 | 版本 | 使用模組 | 用途 |
-|------|------|---------|------|
-| `github.com/spf13/cobra` | — | `cmd/` | CLI 指令框架 |
-| `gopkg.in/yaml.v3` | — | `internal/config` | YAML 設定檔解析 |
-| `github.com/bmatcuk/doublestar/v4` | — | `internal/scanner`, `internal/git` | Glob 模式匹配（`**` 雙星號） |
-| `golang.org/x/sync/errgroup` | — | `internal/generator` | 並行任務錯誤群組管理 |
+	writer := output.NewWriter(absOutDir)
 
----
+	return &Generator{
+		Config:  cfg,
+		Runner:  runner,
+		Engine:  engine,
+		Writer:  writer,
+		Logger:  logger,
+		RootDir: rootDir,
+	}, nil
+}
+```
 
-## 相關連結
+> Source: internal/generator/pipeline.go#L34-L58
 
-- [整體流程與四階段管線](../pipeline/index.md) — 各模組如何在四階段中協作
-- [文件產生管線](../../core-modules/generator/index.md) — Generator 協調層的詳細說明
-- [專案掃描器](../../core-modules/scanner/index.md) — `internal/scanner` 模組說明
-- [Claude CLI 執行器](../../core-modules/claude-runner/index.md) — `internal/claude` 模組說明
-- [Prompt 模板引擎](../../core-modules/prompt-engine/index.md) — `internal/prompt` 模組說明
-- [輸出寫入與連結修復](../../core-modules/output-writer/index.md) — `internal/output` 模組說明
-- [設定說明](../../configuration/index.md) — `selfmd.yaml` 設定結構總覽
+### Per-Phase Dependency Usage
 
----
+Each generation phase pulls in a different subset of modules:
 
-## 參考檔案
+```mermaid
+flowchart LR
+    subgraph CatalogPhase["Catalog Phase"]
+        CP_scanner["scanner"]
+        CP_prompt["prompt"]
+        CP_claude["claude"]
+        CP_catalog["catalog"]
+        CP_config["config"]
+    end
 
-| 檔案路徑 | 說明 |
-|----------|------|
-| `cmd/root.go` | CLI 根指令，全域 flag 定義 |
-| `cmd/generate.go` | `selfmd generate` 指令實作，依賴 `generator`、`claude`、`config` |
-| `cmd/init.go` | `selfmd init` 指令實作，依賴 `config` |
-| `cmd/update.go` | `selfmd update` 指令實作，依賴 `generator`、`git`、`scanner`、`claude`、`config` |
-| `cmd/translate.go` | `selfmd translate` 指令實作，依賴 `generator`、`claude`、`config` |
-| `internal/config/config.go` | `Config` 結構定義、預設值、載入與驗證邏輯 |
-| `internal/catalog/catalog.go` | `Catalog`、`CatalogItem`、`FlatItem` 資料模型與操作方法 |
-| `internal/prompt/engine.go` | `Engine` 模板引擎，`CatalogPromptData`、`ContentPromptData` 等資料型別 |
-| `internal/git/git.go` | Git CLI 封裝：取得 commit、diff、過濾檔案 |
-| `internal/scanner/scanner.go` | 目錄遍歷與 glob 過濾邏輯 |
-| `internal/scanner/filetree.go` | `ScanResult`、`FileNode` 定義與樹狀渲染 |
-| `internal/claude/runner.go` | `Runner` struct，執行 Claude CLI 子行程與重試邏輯 |
-| `internal/claude/parser.go` | JSON 解析、`<document>` 標籤擷取、樣板清理 |
-| `internal/claude/types.go` | `RunOptions`、`RunResult`、`CLIResponse` 型別定義 |
-| `internal/output/writer.go` | `Writer` 寫入文件頁面、目錄 JSON、commit 記錄 |
-| `internal/output/linkfixer.go` | `LinkFixer` 修復 Markdown 相對路徑連結 |
-| `internal/output/navigation.go` | 產生 `index.md`、`_sidebar.md`、分類索引頁 |
-| `internal/generator/pipeline.go` | `Generator` struct 定義、`NewGenerator`、`Generate` 主流程 |
-| `internal/generator/catalog_phase.go` | 第二階段：呼叫 Claude 產生目錄 |
-| `internal/generator/content_phase.go` | 第三階段：並行產生內容頁面 |
-| `internal/generator/index_phase.go` | 第四階段：產生索引與導航 |
-| `internal/generator/translate_phase.go` | 翻譯流程：並行翻譯所有頁面至目標語言 |
-| `internal/generator/updater.go` | 增量更新流程：比對 git diff 並選擇性重新產生 |
+    subgraph ContentPhase["Content Phase"]
+        CON_scanner["scanner"]
+        CON_prompt["prompt"]
+        CON_claude["claude"]
+        CON_catalog["catalog"]
+        CON_output["output"]
+        CON_config["config"]
+    end
+
+    subgraph IndexPhase["Index Phase"]
+        IP_catalog["catalog"]
+        IP_output["output"]
+    end
+
+    subgraph TranslatePhase["Translate Phase"]
+        TP_prompt["prompt"]
+        TP_claude["claude"]
+        TP_catalog["catalog"]
+        TP_output["output"]
+        TP_config["config"]
+    end
+
+    subgraph UpdatePhase["Update Phase"]
+        UP_scanner["scanner"]
+        UP_prompt["prompt"]
+        UP_claude["claude"]
+        UP_catalog["catalog"]
+        UP_output["output"]
+        UP_git["git"]
+    end
+```
+
+| Phase | Modules Used |
+|-------|-------------|
+| Catalog Phase | `scanner`, `prompt`, `claude`, `catalog`, `config` |
+| Content Phase | `scanner`, `prompt`, `claude`, `catalog`, `output`, `config` |
+| Index Phase | `catalog`, `output` |
+| Translate Phase | `prompt`, `claude`, `catalog`, `output`, `config` |
+| Update Phase | `scanner`, `prompt`, `claude`, `catalog`, `output`, `git` |
+
+### CMD-Level Dependencies
+
+Each CLI command imports only the modules it needs:
+
+| Command | Imports |
+|---------|---------|
+| `cmd/root.go` | — (only `cobra`) |
+| `cmd/init.go` | `config` |
+| `cmd/generate.go` | `config`, `claude`, `generator` |
+| `cmd/update.go` | `config`, `claude`, `generator`, `git`, `scanner` |
+| `cmd/translate.go` | `config`, `claude`, `generator` |
+
+The `update` command is the most complex entry point because it also directly calls `git` and `scanner` before delegating to the generator:
+
+```go
+func runUpdate(cmd *cobra.Command, args []string) error {
+	// ...
+	if !git.IsGitRepo(rootDir) {
+		return fmt.Errorf("%s", "current directory is not a git repository, cannot perform incremental update")
+	}
+	// ...
+	scan, err := scanner.Scan(cfg, rootDir)
+	if err != nil {
+		return fmt.Errorf("failed to scan project: %w", err)
+	}
+
+	return gen.Update(ctx, scan, previousCommit, currentCommit, changedFiles)
+}
+```
+
+> Source: cmd/update.go#L34-L111
+
+## External Dependencies
+
+The project keeps its external dependency surface minimal:
+
+| Dependency | Version | Used By | Purpose |
+|-----------|---------|---------|---------|
+| `github.com/spf13/cobra` | v1.10.2 | `cmd/*` | CLI framework |
+| `gopkg.in/yaml.v3` | v3.0.1 | `internal/config` | YAML config parsing |
+| `github.com/bmatcuk/doublestar/v4` | v4.10.0 | `internal/scanner`, `internal/git` | Glob pattern matching (`**` support) |
+| `golang.org/x/sync` | v0.19.0 | `internal/generator` | `errgroup` for concurrent page generation |
+
+```go
+require (
+	github.com/bmatcuk/doublestar/v4 v4.10.0
+	github.com/spf13/cobra v1.10.2
+	golang.org/x/sync v0.19.0
+	gopkg.in/yaml.v3 v3.0.1
+)
+```
+
+> Source: go.mod#L5-L10
+
+## Design Principles
+
+### No Circular Dependencies
+
+The layered architecture guarantees there are no circular imports. Dependencies always flow downward:
+
+- Layer 0 (foundation) modules never import other `internal/` packages
+- Layer 1–2 modules import only from Layer 0
+- The generator (Layer 3) aggregates all lower layers
+- CLI commands (Layer 4) import from any lower layer
+
+### Single Responsibility
+
+Each module has a well-defined boundary:
+- `config` — only configuration data structures and loading
+- `catalog` — only catalog tree data structures and serialization
+- `scanner` — only filesystem traversal with glob filtering
+- `claude` — only Claude CLI process execution and response parsing
+- `prompt` — only template rendering
+- `output` — only writing files, fixing links, generating navigation
+- `git` — only git CLI interaction
+- `generator` — only pipeline orchestration, connecting other modules
+
+### Dependency Injection via Constructor
+
+The `Generator` receives all its dependencies through `NewGenerator`, making the dependency graph explicit and testable:
+
+```go
+gen, err := generator.NewGenerator(cfg, rootDir, logger)
+```
+
+> Source: cmd/generate.go#L75-L78
+
+This pattern avoids hidden global state and makes the wiring between modules visible at the call site.
+
+## Related Links
+
+- [System Architecture](../index.md)
+- [Generation Pipeline](../pipeline/index.md)
+- [Project Scanner](../../core-modules/scanner/index.md)
+- [Catalog Manager](../../core-modules/catalog/index.md)
+- [Claude Runner](../../core-modules/claude-runner/index.md)
+- [Prompt Engine](../../core-modules/prompt-engine/index.md)
+- [Documentation Generator](../../core-modules/generator/index.md)
+- [Output Writer](../../core-modules/output-writer/index.md)
+- [Tech Stack](../../overview/tech-stack/index.md)
+
+## Reference Files
+
+| File Path | Description |
+|-----------|-------------|
+| `main.go` | Application entry point |
+| `go.mod` | Go module and external dependency definitions |
+| `cmd/root.go` | Root CLI command and global flags |
+| `cmd/generate.go` | Generate command wiring config, claude, and generator |
+| `cmd/init.go` | Init command using config module |
+| `cmd/update.go` | Update command using config, claude, generator, git, and scanner |
+| `cmd/translate.go` | Translate command using config, claude, and generator |
+| `internal/config/config.go` | Config struct definitions, loading, validation, and defaults |
+| `internal/catalog/catalog.go` | Catalog and CatalogItem types, JSON parsing, tree flattening |
+| `internal/scanner/scanner.go` | Project directory scanning with include/exclude glob filtering |
+| `internal/scanner/filetree.go` | FileNode tree structure, ScanResult type, and tree rendering |
+| `internal/claude/runner.go` | Claude CLI subprocess runner with retry logic |
+| `internal/claude/parser.go` | JSON/Markdown/document-tag extraction from Claude responses |
+| `internal/claude/types.go` | RunOptions, RunResult, and CLIResponse type definitions |
+| `internal/prompt/engine.go` | Template engine with embedded templates and prompt data types |
+| `internal/generator/pipeline.go` | Generator struct, NewGenerator constructor, Generate pipeline |
+| `internal/generator/catalog_phase.go` | Catalog generation phase using scanner, prompt, and claude |
+| `internal/generator/content_phase.go` | Content page generation with concurrency, link fixing |
+| `internal/generator/index_phase.go` | Index and sidebar generation using catalog and output |
+| `internal/generator/translate_phase.go` | Translation pipeline using prompt, claude, catalog, and output |
+| `internal/generator/updater.go` | Incremental update logic using git, catalog, claude, and output |
+| `internal/output/writer.go` | File writing, page management, and catalog JSON persistence |
+| `internal/output/linkfixer.go` | Relative link validation and correction for generated markdown |
+| `internal/output/navigation.go` | Index and sidebar markdown generation from catalog |
+| `internal/output/viewer.go` | Static HTML viewer bundling with embedded assets |
+| `internal/git/git.go` | Git CLI wrapper for repo detection, diffs, and file filtering |

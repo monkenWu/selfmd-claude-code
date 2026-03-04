@@ -1,329 +1,357 @@
-# 專案與掃描目標設定
+# Project Targets
 
-`selfmd.yaml` 中的 `project` 與 `targets` 兩個頂層區段，定義了文件化對象的基本資訊與掃描範圍。這兩個設定區段是 selfmd 理解「要為哪個專案的哪些檔案」產生文件的核心依據。
+The `targets` section of `selfmd.yaml` defines which source files the scanner should include, exclude, and treat as entry points during documentation generation.
 
-## 概述
+## Overview
 
-selfmd 在執行 `generate` 或 `update` 指令時，首先會讀取設定檔，再交由掃描器（Scanner）根據 `targets` 的 `include`、`exclude` 規則遍歷目錄，過濾出需要分析的原始碼檔案。`project` 區段則提供專案的名稱、類型等中繼資料，作為 Claude 產生文件時的重要上下文。
+Project targets control the scope of files that selfmd analyzes. When selfmd scans a project directory, it uses three configuration fields — `include`, `exclude`, and `entry_points` — to determine which files to process. These same patterns are reused during incremental updates to filter git-changed files, ensuring consistency between full generation and update workflows.
 
-關鍵概念說明：
-- **Glob 模式**（glob pattern）：使用 `**` 萬用字元匹配多層目錄的路徑匹配語法，底層由 `doublestar` 函式庫實作。
-- **入口點**（entry points）：額外讀取並完整傳遞給 Claude 的特定檔案，通常為 `main.go`、`cmd/root.go` 等程式進入點。
-- **排除優先**：exclude 規則的優先順序高於 include 規則，若一個路徑同時符合兩者，以排除為準。
+The pattern matching is powered by the [doublestar](https://github.com/bmatcuk/doublestar) library, which supports glob patterns including the `**` wildcard for recursive directory matching.
 
-`selfmd init` 指令會自動偵測專案類型並產生包含合理預設值的設定檔，使用者通常只需微調 `include`／`exclude` 即可。
-
-## 架構
+## Architecture
 
 ```mermaid
 flowchart TD
-    YAML["selfmd.yaml"]
-    Load["config.Load()"]
-    ProjectConfig["ProjectConfig\n(name, type, description)"]
-    TargetsConfig["TargetsConfig\n(include, exclude, entry_points)"]
+    Config["TargetsConfig"]
     Scanner["scanner.Scan()"]
-    WalkDir["filepath.WalkDir()"]
-    ExcludeCheck["排除規則檢查\ndoublestar.Match(exclude)"]
-    IncludeCheck["包含規則檢查\ndoublestar.Match(include)"]
-    ScanResult["ScanResult\n(FileList, Tree, EntryPointContents)"]
-    CatalogPhase["GenerateCatalog()\n目錄產生階段"]
+    GitFilter["git.FilterChangedFiles()"]
+    Include["include patterns"]
+    Exclude["exclude patterns"]
+    EntryPoints["entry_points"]
 
-    YAML --> Load
-    Load --> ProjectConfig
-    Load --> TargetsConfig
-    TargetsConfig --> Scanner
-    Scanner --> WalkDir
-    WalkDir --> ExcludeCheck
-    ExcludeCheck -->|"未命中 → 繼續"| IncludeCheck
-    ExcludeCheck -->|"命中 → 跳過"| WalkDir
-    IncludeCheck -->|"命中 → 收錄"| ScanResult
-    IncludeCheck -->|"未命中 → 忽略"| WalkDir
-    ProjectConfig --> CatalogPhase
-    ScanResult --> CatalogPhase
+    Config --> Include
+    Config --> Exclude
+    Config --> EntryPoints
+
+    Include --> Scanner
+    Exclude --> Scanner
+    EntryPoints --> Scanner
+
+    Include --> GitFilter
+    Exclude --> GitFilter
+
+    Scanner --> ScanResult["ScanResult"]
+    ScanResult --> CatalogPhase["Catalog Phase"]
+    ScanResult --> ContentPhase["Content Phase"]
+    GitFilter --> UpdateCmd["update command"]
 ```
 
-## `project` 區段
+## Configuration Fields
 
-`project` 區段提供當前專案的基本描述資訊，這些資訊會直接注入 Claude 的 Prompt 中，幫助 AI 理解專案背景。
-
-```yaml
-project:
-  name: selfmd
-  type: backend
-  description: ""
-```
-
-### 欄位說明
-
-| 欄位 | 型別 | 必填 | 預設值 | 說明 |
-|------|------|------|--------|------|
-| `name` | string | 否 | 當前目錄名稱 | 專案名稱，顯示於文件標題與靜態瀏覽器 |
-| `type` | string | 否 | `backend` | 專案類型，提示 Claude 文件架構風格 |
-| `description` | string | 否 | 空字串 | 專案的附加說明（選填） |
-
-### 可用的 `type` 值
-
-`selfmd init` 的自動偵測邏輯會根據特定指標檔案決定專案類型：
+The `TargetsConfig` struct defines three fields that control file targeting:
 
 ```go
-checks := []struct {
-    file       string
-    pType      string
-    entries    []string
-}{
-    {"go.mod", "backend", []string{"main.go", "cmd/root.go"}},
-    {"Cargo.toml", "backend", []string{"src/main.rs", "src/lib.rs"}},
-    {"package.json", "frontend", []string{"src/index.ts", "src/index.js", "src/main.ts", "src/App.tsx"}},
-    {"pom.xml", "backend", []string{"src/main/java"}},
-    {"build.gradle", "backend", []string{"src/main/java"}},
-    {"requirements.txt", "backend", []string{"main.py", "app.py", "src/main.py"}},
-    {"pyproject.toml", "backend", []string{"src/main.py", "main.py"}},
-    {"composer.json", "backend", []string{"public/index.php", "src/Kernel.php"}},
-    {"Gemfile", "backend", []string{"config/application.rb", "app/"}},
+type TargetsConfig struct {
+	Include     []string `yaml:"include"`
+	Exclude     []string `yaml:"exclude"`
+	EntryPoints []string `yaml:"entry_points"`
 }
 ```
 
-> 來源：`cmd/init.go#L61-L75`
+> Source: internal/config/config.go#L25-L29
 
-| `type` 值 | 意義 |
-|-----------|------|
-| `backend` | 後端服務、API、CLI 工具 |
-| `frontend` | 前端應用程式（SPA、Web App） |
-| `fullstack` | 同時包含前後端的全端專案 |
-| `library` | 函式庫或無法偵測到指標檔案的專案 |
+### `include`
 
-若同時存在 `package.json` 與 `go.mod`（或 `server/` 目錄），則自動判定為 `fullstack`。
+A list of glob patterns specifying which files to include in the scan. Only files matching at least one include pattern are processed. If the list is empty, all files are included (subject to exclusions).
 
-## `targets` 區段
+### `exclude`
 
-`targets` 區段控制掃描器要分析哪些檔案，是影響文件覆蓋範圍最關鍵的設定。
+A list of glob patterns specifying files and directories to skip. Exclusions are evaluated first — if a directory matches an exclude pattern, the scanner skips the entire directory tree via `filepath.SkipDir`.
 
-```yaml
-targets:
-  include:
-    - src/**
-    - pkg/**
-    - cmd/**
-    - internal/**
-    - lib/**
-    - app/**
-  exclude:
-    - vendor/**
-    - node_modules/**
-    - .git/**
-    - .doc-build/**
-    - "**/*.pb.go"
-    - "**/generated/**"
-    - dist/**
-    - build/**
-  entry_points:
-    - main.go
-    - cmd/root.go
-```
+### `entry_points`
 
-### 欄位說明
+A list of relative file paths pointing to the project's main entry files. The scanner reads their content and passes it to the catalog generation prompt, giving Claude additional context about the project's structure and purpose.
 
-| 欄位 | 型別 | 必填 | 預設值 | 說明 |
-|------|------|------|--------|------|
-| `include` | []string | 否 | 見下方 | 需要掃描的路徑模式（glob），空陣列代表包含所有檔案 |
-| `exclude` | []string | 否 | 見下方 | 需要排除的路徑模式（glob），優先於 include |
-| `entry_points` | []string | 否 | `[]` | 額外讀取並完整注入 Prompt 的重要檔案路徑 |
+## Default Values
 
-### 預設的 `include` 模式
+When `selfmd init` generates a new configuration, it applies these defaults:
 
 ```go
-Include: []string{"src/**", "pkg/**", "cmd/**", "internal/**", "lib/**", "app/**"},
-```
-
-> 來源：`internal/config/config.go#L103`
-
-### 預設的 `exclude` 模式
-
-```go
-Exclude: []string{
-    "vendor/**", "node_modules/**", ".git/**", ".doc-build/**",
-    "**/*.pb.go", "**/generated/**", "dist/**", "build/**",
+Targets: TargetsConfig{
+	Include: []string{"src/**", "pkg/**", "cmd/**", "internal/**", "lib/**", "app/**"},
+	Exclude: []string{
+		"vendor/**", "node_modules/**", ".git/**", ".doc-build/**",
+		"**/*.pb.go", "**/generated/**", "dist/**", "build/**",
+	},
+	EntryPoints: []string{},
 },
 ```
 
-> 來源：`internal/config/config.go#L104-L108`
+> Source: internal/config/config.go#L102-L109
 
-## 掃描規則的執行順序
+The `init` command also auto-detects entry points based on the project type:
 
-掃描器在遍歷目錄時，排除規則（exclude）的優先級高於包含規則（include）。當掃描到一個目錄且命中 exclude 規則時，會直接跳過整個子目錄樹（`filepath.SkipDir`），大幅提升效能。
+```go
+checks := []struct {
+	file    string
+	pType   string
+	entries []string
+}{
+	{"go.mod", "backend", []string{"main.go", "cmd/root.go"}},
+	{"Cargo.toml", "backend", []string{"src/main.rs", "src/lib.rs"}},
+	{"package.json", "frontend", []string{"src/index.ts", "src/index.js", "src/main.ts", "src/App.tsx"}},
+	{"pom.xml", "backend", []string{"src/main/java"}},
+	{"build.gradle", "backend", []string{"src/main/java"}},
+	{"requirements.txt", "backend", []string{"main.py", "app.py", "src/main.py"}},
+	{"pyproject.toml", "backend", []string{"src/main.py", "main.py"}},
+	{"composer.json", "backend", []string{"public/index.php", "src/Kernel.php"}},
+	{"Gemfile", "backend", []string{"config/application.rb", "app/"}},
+}
+```
+
+> Source: cmd/init.go#L61-L75
+
+Only entry point paths that actually exist on disk are included in the final configuration.
+
+## Glob Pattern Syntax
+
+Patterns use the `doublestar` library for matching. Key rules:
+
+| Pattern | Meaning |
+|---------|---------|
+| `*` | Matches any sequence of non-separator characters |
+| `**` | Matches zero or more directories recursively |
+| `?` | Matches any single non-separator character |
+| `[abc]` | Matches any character in the set |
+| `{a,b}` | Matches either `a` or `b` |
+
+Examples:
+
+| Pattern | Matches |
+|---------|---------|
+| `src/**` | All files under `src/` at any depth |
+| `**/*.pb.go` | All Protocol Buffer generated Go files |
+| `**/generated/**` | All files within any `generated/` directory |
+| `vendor/**` | All files under `vendor/` |
+
+## Core Processes
+
+### Scanner File Filtering
+
+The scanner walks the project directory and applies exclude patterns first, then include patterns:
+
+```mermaid
+flowchart TD
+    Walk["filepath.WalkDir()"]
+    CheckExclude{"Matches exclude pattern?"}
+    IsDir{"Is directory?"}
+    SkipDir["filepath.SkipDir"]
+    SkipFile["Skip file"]
+    CheckInclude{"Matches include pattern?"}
+    AddFile["Add to file list"]
+
+    Walk --> CheckExclude
+    CheckExclude -->|Yes| IsDir
+    IsDir -->|Yes| SkipDir
+    IsDir -->|No| SkipFile
+    CheckExclude -->|No| CheckInclude
+    CheckInclude -->|Yes| AddFile
+    CheckInclude -->|No| SkipFile
+```
+
+The scanner implementation applies this logic during directory traversal:
 
 ```go
 // check excludes
 for _, pattern := range cfg.Targets.Exclude {
-    matched, _ := doublestar.Match(pattern, rel)
-    if matched {
-        if d.IsDir() {
-            return filepath.SkipDir
-        }
-        return nil
-    }
+	matched, _ := doublestar.Match(pattern, rel)
+	if matched {
+		if d.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	}
 }
 
-// ...（目錄本身不做 include 過濾）
+// ...
 
 // check includes
 if len(cfg.Targets.Include) > 0 {
-    included := false
-    for _, pattern := range cfg.Targets.Include {
-        matched, _ := doublestar.Match(pattern, rel)
-        if matched {
-            included = true
-            break
-        }
-    }
-    if !included {
-        return nil
-    }
+	included := false
+	for _, pattern := range cfg.Targets.Include {
+		matched, _ := doublestar.Match(pattern, rel)
+		if matched {
+			included = true
+			break
+		}
+	}
+	if !included {
+		return nil
+	}
 }
 ```
 
-> 來源：`internal/scanner/scanner.go#L33-L61`
+> Source: internal/scanner/scanner.go#L33-L61
 
-### 過濾流程
+### Entry Point Reading
 
-```mermaid
-flowchart TD
-    Start(["遍歷到路徑 path"])
-    IsExcluded{"命中 exclude\n模式？"}
-    IsDir{"是目錄？"}
-    SkipDir["SkipDir\n跳過整個子目錄"]
-    SkipFile["跳過此檔案"]
-    CountDir["計入 totalDirs"]
-    IsIncluded{"命中 include\n模式？\n（include 非空時）"}
-    AddFile["加入 files 清單"]
-    Done(["結束此路徑"])
-
-    Start --> IsExcluded
-    IsExcluded -->|是| IsDir
-    IsDir -->|是目錄| SkipDir --> Done
-    IsDir -->|是檔案| SkipFile --> Done
-    IsExcluded -->|否| IsDir2{"是目錄？"}
-    IsDir2 -->|是| CountDir --> Done
-    IsDir2 -->|否| IsIncluded
-    IsIncluded -->|是| AddFile --> Done
-    IsIncluded -->|否| Done
-```
-
-## 入口點（Entry Points）的作用
-
-`entry_points` 中指定的檔案，會在掃描完成後被讀取，其完整內容會格式化後注入 Claude 的目錄產生 Prompt（`CatalogPromptData.EntryPoints`）。這讓 Claude 在理解專案結構時能直接閱讀最核心的程式碼邏輯。
+After the file list is built, the scanner reads the content of each entry point file and stores it in `ScanResult.EntryPointContents`. Files larger than 50,000 characters are truncated.
 
 ```go
-// read entry points
 entryPointContents := make(map[string]string)
 for _, ep := range cfg.Targets.EntryPoints {
-    content := readFileIfExists(rootDir, ep)
-    if content != "" {
-        entryPointContents[ep] = content
-    }
+	content := readFileIfExists(rootDir, ep)
+	if content != "" {
+		entryPointContents[ep] = content
+	}
 }
 ```
 
-> 來源：`internal/scanner/scanner.go#L83-L91`
+> Source: internal/scanner/scanner.go#L84-L90
 
-入口點檔案會被截斷至 10,000 字元以避免超出 context 限制，並以 Markdown 程式碼區塊格式傳遞：
+This content is then formatted and injected into the catalog generation prompt via `EntryPointsFormatted()`:
 
 ```go
-func (s *ScanResult) EntryPointsFormatted() string {
-    if len(s.EntryPointContents) == 0 {
-        return "(no entry points specified)"
-    }
-
-    var sb strings.Builder
-    for path, content := range s.EntryPointContents {
-        sb.WriteString("### " + path + "\n```\n")
-        // truncate large files
-        if len(content) > 10000 {
-            content = content[:10000] + "\n... (truncated)"
-        }
-        sb.WriteString(content)
-        sb.WriteString("\n```\n\n")
-    }
-    return sb.String()
+data := prompt.CatalogPromptData{
+	// ...
+	EntryPoints: scan.EntryPointsFormatted(),
+	// ...
 }
 ```
 
-> 來源：`internal/scanner/scanner.go#L143-L160`
+> Source: internal/generator/catalog_phase.go#L17-L28
 
-## 常見設定範例
+### Git Change Filtering
 
-### Go 後端專案（預設）
+During incremental updates (`selfmd update`), the same include/exclude patterns filter git-changed files to ensure only relevant changes trigger documentation regeneration:
 
-```yaml
-project:
-  name: my-service
-  type: backend
-
-targets:
-  include:
-    - cmd/**
-    - internal/**
-    - pkg/**
-  exclude:
-    - vendor/**
-    - .doc-build/**
-    - "**/*.pb.go"
-  entry_points:
-    - main.go
-    - cmd/root.go
+```go
+changedFiles = git.FilterChangedFiles(changedFiles, cfg.Targets.Include, cfg.Targets.Exclude)
 ```
 
-### Node.js 前端專案
+> Source: cmd/update.go#L94
 
-```yaml
-project:
-  name: my-frontend
-  type: frontend
+The `FilterChangedFiles` function parses `git diff --name-status` output and applies the same doublestar matching logic:
 
-targets:
-  include:
-    - src/**
-    - components/**
-    - pages/**
-  exclude:
-    - node_modules/**
-    - dist/**
-    - "**/*.test.ts"
-  entry_points:
-    - src/main.ts
-    - src/App.tsx
+```go
+func FilterChangedFiles(changedFiles string, includes, excludes []string) string {
+	lines := strings.Split(changedFiles, "\n")
+	var filtered []string
+
+	for _, line := range lines {
+		// ...
+		filePath := parts[len(parts)-1]
+
+		// Check excludes
+		excluded := false
+		for _, pattern := range excludes {
+			if matched, _ := doublestar.Match(pattern, filePath); matched {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
+			continue
+		}
+
+		// Check includes (if configured)
+		if len(includes) > 0 {
+			included := false
+			for _, pattern := range includes {
+				if matched, _ := doublestar.Match(pattern, filePath); matched {
+					included = true
+					break
+				}
+			}
+			if !included {
+				continue
+			}
+		}
+
+		filtered = append(filtered, line)
+	}
+
+	return strings.Join(filtered, "\n")
+}
 ```
 
-### 排除特定目錄與檔案類型
+> Source: internal/git/git.go#L73-L122
+
+## Usage Examples
+
+A typical `targets` section in `selfmd.yaml`:
 
 ```yaml
 targets:
-  include:
-    - src/**
-  exclude:
-    - src/vendor/**
-    - "**/*.generated.go"
-    - "**/testdata/**"
-    - "**/*_test.go"
+    include:
+        - src/**
+        - pkg/**
+        - cmd/**
+        - internal/**
+        - lib/**
+        - app/**
+    exclude:
+        - vendor/**
+        - node_modules/**
+        - .git/**
+        - .doc-build/**
+        - '**/*.pb.go'
+        - '**/generated/**'
+        - dist/**
+        - build/**
+    entry_points:
+        - main.go
+        - cmd/root.go
 ```
 
-## 相關連結
+> Source: selfmd.yaml#L5-L23
 
-- [selfmd.yaml 結構總覽](../config-overview/index.md)
-- [輸出與多語言設定](../output-language/index.md)
-- [Claude CLI 整合設定](../claude-config/index.md)
-- [Git 整合設定](../git-config/index.md)
-- [專案掃描器](../../core-modules/scanner/index.md)
-- [selfmd init 指令](../../cli/cmd-init/index.md)
+### Customization Tips
 
-## 參考檔案
+**Monorepo with multiple services:** narrow the include patterns to the relevant service directory:
 
-| 檔案路徑 | 說明 |
-|----------|------|
-| `internal/config/config.go` | `Config`、`ProjectConfig`、`TargetsConfig` 結構定義、預設值、載入與驗證邏輯 |
-| `internal/scanner/scanner.go` | `Scan()` 實作：目錄遍歷、include/exclude 過濾、entry points 讀取 |
-| `internal/scanner/filetree.go` | `ScanResult`、`FileNode` 結構定義；`BuildTree()`、`RenderTree()` 實作 |
-| `cmd/init.go` | `init` 指令實作；`detectProject()` 自動偵測專案類型與入口點 |
-| `internal/prompt/engine.go` | `CatalogPromptData` 結構，顯示 `ProjectType`、`EntryPoints`、`FileTree` 如何注入 Prompt |
-| `internal/generator/catalog_phase.go` | 目錄產生階段，展示 `ProjectConfig` 與 `ScanResult` 如何組合成 Prompt |
-| `internal/generator/pipeline.go` | 完整管線流程，顯示 `scanner.Scan()` 被呼叫的時機與上下文 |
+```yaml
+targets:
+    include:
+        - services/api/**
+        - shared/lib/**
+```
+
+**Frontend project:** focus on source files and exclude test/build artifacts:
+
+```yaml
+targets:
+    include:
+        - src/**
+    exclude:
+        - node_modules/**
+        - dist/**
+        - '**/*.test.ts'
+        - '**/*.spec.ts'
+        - coverage/**
+```
+
+**Adding entry points:** specify the main files Claude should read for project context:
+
+```yaml
+targets:
+    entry_points:
+        - src/index.ts
+        - src/App.tsx
+```
+
+## Related Links
+
+- [Configuration Overview](../config-overview/index.md)
+- [Claude Settings](../claude-config/index.md)
+- [Git Integration Settings](../git-config/index.md)
+- [Project Scanner](../../core-modules/scanner/index.md)
+- [Change Detection](../../git-integration/change-detection/index.md)
+- [Affected Page Matching](../../git-integration/affected-pages/index.md)
+- [Catalog Phase](../../core-modules/generator/catalog-phase/index.md)
+
+## Reference Files
+
+| File Path | Description |
+|-----------|-------------|
+| `internal/config/config.go` | `TargetsConfig` struct definition and default values |
+| `internal/scanner/scanner.go` | Scanner implementation using include/exclude patterns and entry point reading |
+| `internal/scanner/filetree.go` | `ScanResult` struct and file tree building |
+| `internal/git/git.go` | `FilterChangedFiles` applying targets patterns to git diffs |
+| `internal/generator/pipeline.go` | Generator pipeline invoking the scanner |
+| `internal/generator/catalog_phase.go` | Catalog phase consuming entry point content |
+| `internal/prompt/engine.go` | `CatalogPromptData` struct with `EntryPoints` field |
+| `cmd/init.go` | Auto-detection of project type and entry points |
+| `cmd/generate.go` | Generate command loading config and invoking pipeline |
+| `cmd/update.go` | Update command filtering changed files with targets patterns |
+| `selfmd.yaml` | Example project configuration file |

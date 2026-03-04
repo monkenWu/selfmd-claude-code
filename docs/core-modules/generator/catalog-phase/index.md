@@ -1,175 +1,102 @@
-# 目錄產生階段
+# Catalog Phase
 
-目錄產生階段（Catalog Phase）是整個文件產生管線的第二階段，負責透過 Claude CLI 分析專案結構，並自動生成結構化的文件目錄樹。
+The Catalog Phase is the second phase of selfmd's documentation generation pipeline. It uses Claude AI to analyze a project's source code structure and produce a hierarchical documentation catalog in JSON format.
 
-## 概述
+## Overview
 
-在 selfmd 的四階段管線中，目錄產生階段（Pipeline 第 2 階段）扮演核心樞紐角色：它接收掃描器的專案結構資料，透過 Prompt 模板引擎組裝提示語，呼叫 Claude CLI 進行 AI 分析，最終輸出一份結構化的 `Catalog`（文件目錄）物件，供後續的內容頁面產生階段使用。
+The Catalog Phase serves as the structural planning step for the entire documentation generation process. After the project scanner has collected the file tree, key files, README content, and entry points, the Catalog Phase sends this information to Claude via a prompt template. Claude analyzes the codebase and returns a JSON catalog that defines the documentation's table of contents — including section titles, paths, ordering, and nesting hierarchy.
 
-本階段的關鍵設計決策包括：
+This catalog then drives all subsequent phases: Content Phase uses it to know which pages to generate, and Index Phase uses it to build navigation.
 
-- **AI 驅動**：讓 Claude 理解程式碼語意，而非單純分析檔案結構，以產生更符合業務邏輯的文件目錄
-- **快取復用**：若輸出目錄中已存在 `_catalog.json`，則直接載入跳過本階段，節省 API 費用
-- **重試機制**：透過 `RunWithRetry` 應對 Claude CLI 的暫時性失敗
-- **結構化輸出**：強制要求 Claude 輸出 JSON 格式，再解析為強型別的 `Catalog` 結構
+Key responsibilities:
+- Assemble project metadata into a `CatalogPromptData` struct
+- Render the catalog prompt template via the Prompt Engine
+- Invoke Claude CLI with retry logic
+- Extract and parse the JSON catalog from Claude's response
+- Track invocation cost and duration
 
-## 架構
+## Architecture
 
 ```mermaid
 flowchart TD
-    Pipeline["pipeline.go\nGenerator.Generate()"]
-    CatalogPhase["catalog_phase.go\nGenerator.GenerateCatalog()"]
-    PromptEngine["prompt.Engine\nRenderCatalog()"]
-    CatalogTmpl["catalog.tmpl\n（語言模板）"]
-    ClaudeRunner["claude.Runner\nRunWithRetry()"]
-    ExtractJSON["claude.ExtractJSONBlock()"]
-    CatalogParse["catalog.Parse()"]
-    CatalogStruct["catalog.Catalog\n結構化目錄"]
-    Writer["output.Writer\nWriteCatalogJSON()"]
-
-    Pipeline -->|"clean 或無快取"| CatalogPhase
-    Pipeline -->|"有快取 _catalog.json"| Writer2["output.Writer\nReadCatalogJSON()"]
-    Writer2 -->|JSON 字串| CatalogParse
-    CatalogPhase --> PromptEngine
-    PromptEngine --> CatalogTmpl
-    CatalogTmpl -->|rendered prompt| ClaudeRunner
-    ClaudeRunner -->|RunResult.Content| ExtractJSON
-    ExtractJSON -->|JSON 字串| CatalogParse
-    CatalogParse --> CatalogStruct
-    CatalogPhase -->|"儲存快取"| Writer
-```
-
-## 入口方法
-
-`GenerateCatalog` 定義在 `internal/generator/catalog_phase.go`，是本階段唯一的公開方法：
-
-```go
-func (g *Generator) GenerateCatalog(ctx context.Context, scan *scanner.ScanResult) (*catalog.Catalog, error) {
-	langName := config.GetLangNativeName(g.Config.Output.Language)
-	data := prompt.CatalogPromptData{
-		RepositoryName:       g.Config.Project.Name,
-		ProjectType:          g.Config.Project.Type,
-		Language:             g.Config.Output.Language,
-		LanguageName:         langName,
-		LanguageOverride:     g.Config.Output.NeedsLanguageOverride(),
-		LanguageOverrideName: langName,
-		KeyFiles:             scan.KeyFiles(),
-		EntryPoints:          scan.EntryPointsFormatted(),
-		FileTree:             scanner.RenderTree(scan.Tree, 4),
-		ReadmeContent:        scan.ReadmeContent,
-	}
-
-	rendered, err := g.Engine.RenderCatalog(data)
-	if err != nil {
-		return nil, err
-	}
-	// ...
-}
-```
-
-> 來源：internal/generator/catalog_phase.go#L16-L34
-
-### CatalogPromptData 欄位說明
-
-`prompt.CatalogPromptData` 結構集合了所有用於驅動 Claude 分析的上下文資料：
-
-| 欄位 | 來源 | 說明 |
-|------|------|------|
-| `RepositoryName` | `config.Project.Name` | 專案名稱 |
-| `ProjectType` | `config.Project.Type` | 專案類型（如 `go-cli`） |
-| `Language` | `config.Output.Language` | 目標輸出語言代碼（如 `zh-TW`） |
-| `LanguageName` | `GetLangNativeName()` | 語言的本地名稱（如「繁體中文」） |
-| `LanguageOverride` | `Output.NeedsLanguageOverride()` | 模板語言與輸出語言是否不一致 |
-| `KeyFiles` | `scan.KeyFiles()` | 重要檔案清單（main.go、go.mod 等） |
-| `EntryPoints` | `scan.EntryPointsFormatted()` | 入口檔案的格式化內容 |
-| `FileTree` | `scanner.RenderTree(scan.Tree, 4)` | 深度限制 4 層的檔案樹文字 |
-| `ReadmeContent` | `scan.ReadmeContent` | README 內容（最多 50,000 字元） |
-
-> 來源：internal/prompt/engine.go#L39-L51
-
-## 快取復用機制
-
-在 `pipeline.go` 的 `Generate()` 方法中，目錄產生具備智慧快取邏輯：
-
-```go
-var cat *catalog.Catalog
-if !clean {
-	// Try to reuse existing catalog
-	catJSON, readErr := g.Writer.ReadCatalogJSON()
-	if readErr == nil {
-		cat, err = catalog.Parse(catJSON)
-	}
-	if cat != nil {
-		items := cat.Flatten()
-		fmt.Printf(ui.T("[2/4] 載入已存目錄（%d 個章節，%d 個項目）\n", ...), len(cat.Items), len(items))
-	}
-}
-if cat == nil {
-	fmt.Println(ui.T("[2/4] 產生文件目錄...", ...))
-	cat, err = g.GenerateCatalog(ctx, scan)
-	// ...
-	if err := g.Writer.WriteCatalogJSON(cat); err != nil {
-		g.Logger.Warn(...)
-	}
-}
-```
-
-> 來源：internal/generator/pipeline.go#L103-L128
-
-快取以 `_catalog.json` 檔案儲存在輸出目錄（`.doc-build/`）下。以下情況會重新呼叫 Claude 產生目錄：
-
-- 使用者指定 `--clean` 旗標
-- 設定中 `output.clean_before_generate: true`
-- `_catalog.json` 檔案不存在或無法讀取
-- `_catalog.json` 解析失敗
-
-## 核心流程
-
-```mermaid
-sequenceDiagram
-    participant Pipeline as pipeline.go
-    participant CatalogPhase as catalog_phase.go
-    participant Engine as prompt.Engine
-    participant Runner as claude.Runner
-    participant Parser as claude.parser.go
-    participant CatalogPkg as catalog.Parse()
-    participant Writer as output.Writer
-
-    Pipeline->>Writer: ReadCatalogJSON()
-    alt 快取存在且有效
-        Writer-->>Pipeline: JSON 字串
-        Pipeline->>CatalogPkg: Parse(jsonStr)
-        CatalogPkg-->>Pipeline: *Catalog（復用）
-    else 需要重新產生
-        Pipeline->>CatalogPhase: GenerateCatalog(ctx, scan)
-        CatalogPhase->>Engine: RenderCatalog(CatalogPromptData)
-        Engine-->>CatalogPhase: rendered prompt 字串
-        CatalogPhase->>Runner: RunWithRetry(ctx, RunOptions{Prompt, WorkDir})
-        loop 最多 maxRetries+1 次
-            Runner->>Runner: Run()（呼叫 claude CLI）
-            Runner-->>Runner: ParseResponse()
-        end
-        Runner-->>CatalogPhase: *RunResult{Content, CostUSD, DurationMs}
-        CatalogPhase->>Parser: ExtractJSONBlock(result.Content)
-        Parser-->>CatalogPhase: JSON 字串
-        CatalogPhase->>CatalogPkg: Parse(jsonStr)
-        CatalogPkg-->>CatalogPhase: *Catalog
-        CatalogPhase-->>Pipeline: *Catalog
-        Pipeline->>Writer: WriteCatalogJSON(cat)
+    subgraph Pipeline["Generator Pipeline (pipeline.go)"]
+        Phase1["Phase 1: Scanner"]
+        Phase2["Phase 2: Catalog Phase"]
+        Phase3["Phase 3: Content Phase"]
+        Phase4["Phase 4: Index Phase"]
+        Phase1 --> Phase2
+        Phase2 --> Phase3
+        Phase3 --> Phase4
     end
+
+    subgraph CatalogPhase["Catalog Phase Internals"]
+        AssembleData["Assemble CatalogPromptData"]
+        RenderPrompt["Engine.RenderCatalog()"]
+        InvokeClaude["Runner.RunWithRetry()"]
+        ExtractJSON["claude.ExtractJSONBlock()"]
+        ParseCatalog["catalog.Parse()"]
+        AssembleData --> RenderPrompt
+        RenderPrompt --> InvokeClaude
+        InvokeClaude --> ExtractJSON
+        ExtractJSON --> ParseCatalog
+    end
+
+    Phase2 --> CatalogPhase
+
+    ScanResult["scanner.ScanResult"] --> AssembleData
+    Config["config.Config"] --> AssembleData
+    PromptEngine["prompt.Engine"] --> RenderPrompt
+    ClaudeRunner["claude.Runner"] --> InvokeClaude
+    CatalogStruct["catalog.Catalog"] --> Phase3
+    ParseCatalog --> CatalogStruct
 ```
 
-## Catalog 資料結構
+## Data Flow
 
-Claude 必須以 JSON 格式輸出目錄，再由 `catalog.Parse()` 解析為強型別結構：
+### Input: CatalogPromptData
+
+The Catalog Phase assembles a `CatalogPromptData` struct from the project configuration and scan results. This struct contains all context Claude needs to design an appropriate documentation structure.
 
 ```go
-// Catalog represents the documentation catalog structure.
+type CatalogPromptData struct {
+	RepositoryName       string
+	ProjectType          string
+	Language             string
+	LanguageName         string // native display name (e.g., "繁體中文")
+	LanguageOverride     bool   // true when template lang != output lang
+	LanguageOverrideName string // native name of the desired output language
+	KeyFiles             string
+	EntryPoints          string
+	FileTree             string
+	ReadmeContent        string
+}
+```
+
+> Source: internal/prompt/engine.go#L40-L51
+
+Each field is populated from specific sources:
+
+| Field | Source | Description |
+|-------|--------|-------------|
+| `RepositoryName` | `config.Project.Name` | Project name from `selfmd.yaml` |
+| `ProjectType` | `config.Project.Type` | Project type (e.g., `"backend"`) |
+| `Language` | `config.Output.Language` | Target language code (e.g., `"zh-TW"`) |
+| `LanguageName` | `config.GetLangNativeName()` | Native display name for the language |
+| `LanguageOverride` | `config.Output.NeedsLanguageOverride()` | Whether template lang differs from output lang |
+| `KeyFiles` | `scan.KeyFiles()` | Notable files like `go.mod`, `main.go`, `README.md` |
+| `EntryPoints` | `scan.EntryPointsFormatted()` | Contents of configured entry point files |
+| `FileTree` | `scanner.RenderTree()` | ASCII tree representation of the project |
+| `ReadmeContent` | `scan.ReadmeContent` | Full README content |
+
+### Output: Catalog
+
+The output is a `catalog.Catalog` struct — a tree of `CatalogItem` nodes with titles, paths, ordering, and nested children.
+
+```go
 type Catalog struct {
 	Items []CatalogItem `json:"items"`
 }
 
-// CatalogItem represents a single item in the catalog tree.
 type CatalogItem struct {
 	Title    string        `json:"title"`
 	Path     string        `json:"path"`
@@ -178,98 +105,216 @@ type CatalogItem struct {
 }
 ```
 
-> 來源：internal/catalog/catalog.go#L9-L20
+> Source: internal/catalog/catalog.go#L11-L21
 
-Claude 輸出的原始 JSON 範例格式：
+## Core Process
 
-```json
-{
-  "items": [
-    {
-      "title": "概述",
-      "path": "overview",
-      "order": 0,
-      "children": [
-        {
-          "title": "專案介紹與功能特色",
-          "path": "introduction",
-          "order": 0,
-          "children": []
-        }
-      ]
-    }
-  ]
+```mermaid
+sequenceDiagram
+    participant Gen as Generator
+    participant Cfg as Config
+    participant Scan as ScanResult
+    participant Eng as prompt.Engine
+    participant Run as claude.Runner
+    participant Parse as claude.ExtractJSONBlock
+    participant Cat as catalog.Parse
+
+    Gen->>Cfg: GetLangNativeName(language)
+    Gen->>Scan: KeyFiles(), EntryPointsFormatted()
+    Gen->>Scan: RenderTree(scan.Tree, 4)
+    Note over Gen: Assemble CatalogPromptData
+    Gen->>Eng: RenderCatalog(data)
+    Eng-->>Gen: rendered prompt string
+    Gen->>Run: RunWithRetry(ctx, RunOptions)
+    Note over Run: Invoke Claude CLI with retries
+    Run-->>Gen: RunResult (content, cost, duration)
+    Gen->>Gen: TotalCost += result.CostUSD
+    Gen->>Parse: ExtractJSONBlock(result.Content)
+    Parse-->>Gen: JSON string
+    Gen->>Cat: Parse(jsonStr)
+    Cat-->>Gen: *catalog.Catalog
+```
+
+### Step-by-Step Execution
+
+The `GenerateCatalog` method on the `Generator` struct performs the following steps:
+
+**1. Assemble prompt data**
+
+Project metadata and scan results are gathered into a `CatalogPromptData` struct:
+
+```go
+langName := config.GetLangNativeName(g.Config.Output.Language)
+data := prompt.CatalogPromptData{
+	RepositoryName:       g.Config.Project.Name,
+	ProjectType:          g.Config.Project.Type,
+	Language:             g.Config.Output.Language,
+	LanguageName:         langName,
+	LanguageOverride:     g.Config.Output.NeedsLanguageOverride(),
+	LanguageOverrideName: langName,
+	KeyFiles:             scan.KeyFiles(),
+	EntryPoints:          scan.EntryPointsFormatted(),
+	FileTree:             scanner.RenderTree(scan.Tree, 4),
+	ReadmeContent:        scan.ReadmeContent,
 }
 ```
 
-## JSON 擷取邏輯
+> Source: internal/generator/catalog_phase.go#L16-L28
 
-Claude 的回應可能包含 Markdown 格式的說明文字，`ExtractJSONBlock` 採三階段降級策略從中擷取 JSON：
+**2. Render the prompt template**
+
+The assembled data is passed to the Prompt Engine, which renders `catalog.tmpl` using Go's `text/template`:
 
 ```go
-func ExtractJSONBlock(text string) (string, error) {
-	// 策略 1：尋找 ```json ... ``` 圍欄程式碼區塊
-	re := regexp.MustCompile("(?s)```json\\s*\n(.*?)```")
-	matches := re.FindStringSubmatch(text)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1]), nil
+rendered, err := g.Engine.RenderCatalog(data)
+```
+
+> Source: internal/generator/catalog_phase.go#L30
+
+**3. Invoke Claude with retry logic**
+
+The rendered prompt is sent to the Claude CLI via `RunWithRetry`, which provides automatic retries with exponential backoff:
+
+```go
+result, err := g.Runner.RunWithRetry(ctx, claude.RunOptions{
+	Prompt:  rendered,
+	WorkDir: g.RootDir,
+})
+```
+
+> Source: internal/generator/catalog_phase.go#L37-L40
+
+The retry logic uses `config.Claude.MaxRetries` (default: 2) with a backoff of `attempt * 5 seconds`:
+
+```go
+for attempt := 0; attempt <= maxRetries; attempt++ {
+	if attempt > 0 {
+		backoff := time.Duration(attempt) * 5 * time.Second
+		// ...
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
 	}
-
-	// 策略 2：尋找無語言標籤的 ``` ... ``` 圍欄區塊
-	re = regexp.MustCompile("(?s)```\\s*\n(\\{.*?\\})\\s*```")
-	// ...
-
-	// 策略 3：在純文字中尋找原始 JSON 物件（括號平衡掃描）
-	start := strings.Index(text, "{")
+	result, err := r.Run(ctx, opts)
+	if err == nil && !result.IsError {
+		return result, nil
+	}
 	// ...
 }
 ```
 
-> 來源：internal/claude/parser.go#L26-L61
+> Source: internal/claude/runner.go#L113-L143
 
-## 統計追蹤
+**4. Extract JSON from response**
 
-每次成功呼叫 Claude 後，費用會累計到 `Generator.TotalCost`：
+Claude's response may contain markdown-fenced JSON or raw JSON. `ExtractJSONBlock` tries three strategies in order: fenced ` ```json ` blocks, untagged fenced blocks, and finally raw JSON object extraction via brace-depth counting:
 
 ```go
-g.TotalCost += result.CostUSD
-fmt.Printf(ui.T(" 完成（%.1fs，$%.4f）\n", " Done (%.1fs, $%.4f)\n"),
-    float64(result.DurationMs)/1000, result.CostUSD)
+jsonStr, err := claude.ExtractJSONBlock(result.Content)
 ```
 
-> 來源：internal/generator/catalog_phase.go#L47-L48
+> Source: internal/generator/catalog_phase.go#L50
 
-## Prompt 模板
+**5. Parse into Catalog struct**
 
-目錄產生使用的 Prompt 模板位於 `internal/prompt/templates/<lang>/catalog.tmpl`，模板要求 Claude：
+The extracted JSON string is unmarshalled into a `Catalog` struct. Parsing validates that at least one item exists:
 
-1. 使用工具（Glob、Read、Grep）實際探索專案原始碼
-2. 依業務功能而非檔案結構設計目錄
-3. 僅輸出一個 `\`\`\`json` 程式碼區塊，不附加任何說明文字
+```go
+cat, err := catalog.Parse(jsonStr)
+```
 
-> 來源：internal/prompt/templates/zh-TW/catalog.tmpl#L1-L121
+> Source: internal/generator/catalog_phase.go#L55
 
-## 相關連結
+### Catalog Reuse Optimization
 
-- [文件產生管線](../index.md) — 了解本階段在四階段管線中的完整位置
-- [內容頁面產生階段](../content-phase/index.md) — 接收本階段輸出 Catalog 的下一個階段
-- [文件目錄管理](../../catalog/index.md) — `Catalog`、`CatalogItem`、`FlatItem` 資料結構詳解
-- [Prompt 模板引擎](../../prompt-engine/index.md) — `Engine.RenderCatalog()` 與模板系統
-- [Claude CLI 執行器](../../claude-runner/index.md) — `Runner.RunWithRetry()` 的重試機制詳解
-- [專案掃描器](../../scanner/index.md) — 提供本階段輸入資料的 `ScanResult`
-- [整體流程與四階段管線](../../../architecture/pipeline/index.md) — 系統架構總覽
+In the pipeline's `Generate` method, the catalog phase includes an optimization: if `--clean` was not specified, it first attempts to load an existing `_catalog.json` from the output directory, skipping the Claude call entirely:
 
-## 參考檔案
+```go
+if !clean {
+	catJSON, readErr := g.Writer.ReadCatalogJSON()
+	if readErr == nil {
+		cat, err = catalog.Parse(catJSON)
+	}
+	if cat != nil {
+		items := cat.Flatten()
+		fmt.Printf("[2/4] Loaded existing catalog (%d sections, %d items)\n", len(cat.Items), len(items))
+	}
+}
+if cat == nil {
+	fmt.Println("[2/4] Generating catalog...")
+	cat, err = g.GenerateCatalog(ctx, scan)
+	// ...
+}
+```
 
-| 檔案路徑 | 說明 |
-|----------|------|
-| `internal/generator/catalog_phase.go` | `GenerateCatalog()` 主要實作 |
-| `internal/generator/pipeline.go` | 管線編排、快取復用邏輯與費用統計 |
-| `internal/catalog/catalog.go` | `Catalog`、`CatalogItem`、`FlatItem` 資料結構與解析邏輯 |
-| `internal/prompt/engine.go` | `CatalogPromptData` 定義與 `RenderCatalog()` |
-| `internal/prompt/templates/zh-TW/catalog.tmpl` | 繁體中文目錄產生 Prompt 模板 |
-| `internal/claude/runner.go` | `Runner.Run()` 與 `RunWithRetry()` 實作 |
-| `internal/claude/types.go` | `RunOptions`、`RunResult`、`CLIResponse` 結構定義 |
-| `internal/claude/parser.go` | `ExtractJSONBlock()` JSON 擷取邏輯 |
-| `internal/scanner/scanner.go` | `ScanResult.KeyFiles()` 與 `EntryPointsFormatted()` |
-| `internal/output/writer.go` | `WriteCatalogJSON()` 與 `ReadCatalogJSON()` 快取操作 |
+> Source: internal/generator/pipeline.go#L102-L127
+
+After a successful generation, the catalog JSON is persisted via `Writer.WriteCatalogJSON` so future runs can reuse it.
+
+## Prompt Template
+
+The catalog prompt template (`catalog.tmpl`) instructs Claude to act as a "senior code repository analyst" and produce a JSON catalog. Key aspects of the prompt:
+
+- Provides project metadata (name, type, language)
+- Includes the project's key files, entry points, directory tree, and README
+- Enforces strict rules: completeness, verification via tools, no fabrication
+- Defines catalog design principles focused on business capabilities rather than code structure
+- Specifies a four-step workflow: analyze entry points, explore modules, design structure, verify and output
+- Requires output as a single ` ```json ` code block with the `items` array structure
+
+The prompt explicitly tells Claude to use `Read`, `Glob`, and `Grep` tools to explore the project before designing the catalog.
+
+## Catalog Structure
+
+The generated catalog uses a nested tree structure. Each item has:
+
+- **`title`**: Human-readable section title in the configured output language
+- **`path`**: URL-safe, lowercase, hyphen-separated path segment
+- **`order`**: Numeric ordering within its siblings
+- **`children`**: Nested sub-items forming the hierarchy
+
+The `Catalog.Flatten()` method converts this tree into a flat list of `FlatItem` entries for iteration, computing full dot-notation paths and filesystem directory paths:
+
+```go
+type FlatItem struct {
+	Title      string
+	Path       string // dot-notation path, e.g., "core-modules.authentication"
+	DirPath    string // filesystem path, e.g., "core-modules/authentication"
+	Depth      int
+	ParentPath string
+	HasChildren bool
+}
+```
+
+> Source: internal/catalog/catalog.go#L24-L31
+
+## Related Links
+
+- [Documentation Generator](../index.md) — Parent module overview
+- [Content Phase](../content-phase/index.md) — Next phase that generates pages from this catalog
+- [Index Phase](../index-phase/index.md) — Final phase that builds navigation from the catalog
+- [Prompt Engine](../../prompt-engine/index.md) — Template engine that renders the catalog prompt
+- [Claude Runner](../../claude-runner/index.md) — CLI runner that executes the Claude invocation
+- [Catalog Manager](../../catalog/index.md) — Catalog data structures and parsing
+- [Project Scanner](../../scanner/index.md) — Scanner that produces the input ScanResult
+- [Generation Pipeline](../../../architecture/pipeline/index.md) — Overall pipeline architecture
+
+## Reference Files
+
+| File Path | Description |
+|-----------|-------------|
+| `internal/generator/catalog_phase.go` | Core `GenerateCatalog` method implementation |
+| `internal/generator/pipeline.go` | Pipeline orchestration with catalog reuse logic |
+| `internal/catalog/catalog.go` | `Catalog`, `CatalogItem`, and `FlatItem` struct definitions and parsing |
+| `internal/prompt/engine.go` | `CatalogPromptData` struct and `RenderCatalog` method |
+| `internal/claude/runner.go` | `Runner.RunWithRetry` retry logic and CLI invocation |
+| `internal/claude/parser.go` | `ExtractJSONBlock` JSON extraction from Claude responses |
+| `internal/claude/types.go` | `RunOptions`, `RunResult`, and `CLIResponse` type definitions |
+| `internal/scanner/scanner.go` | `ScanResult`, `KeyFiles()`, and `EntryPointsFormatted()` methods |
+| `internal/scanner/filetree.go` | `FileNode` tree and `RenderTree` for prompt rendering |
+| `internal/config/config.go` | `Config` struct, language settings, and `NeedsLanguageOverride` |
+| `internal/output/writer.go` | `WriteCatalogJSON` and `ReadCatalogJSON` for catalog persistence |
+| `internal/prompt/templates/en-US/catalog.tmpl` | English catalog prompt template |
+| `cmd/generate.go` | CLI entry point invoking the generation pipeline |

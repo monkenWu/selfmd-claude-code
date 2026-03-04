@@ -102,14 +102,14 @@ func DefaultConfig() *Config {
 		Targets: TargetsConfig{
 			Include: []string{"src/**", "pkg/**", "cmd/**", "internal/**", "lib/**", "app/**"},
 			Exclude: []string{
-				"vendor/**", "node_modules/**", ".git/**", ".doc-build/**",
+				"vendor/**", "node_modules/**", ".git/**", "docs/**",
 				"**/*.pb.go", "**/generated/**", "dist/**", "build/**",
 			},
 			EntryPoints: []string{},
 		},
 		Output: OutputConfig{
-			Dir:                 ".doc-build",
-			Language:            "zh-TW",
+			Dir:                 "docs",
+			Language:            "en-US",
 			SecondaryLanguages:  []string{},
 			CleanBeforeGenerate: false,
 		},

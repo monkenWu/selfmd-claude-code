@@ -1,354 +1,487 @@
-# 增量更新
+# Incremental Update Engine
 
-增量更新（Incremental Update）模組讓 selfmd 能在 git 變更後，僅針對受影響的文件頁面進行重新產生，避免每次都執行耗時的完整 `generate` 流程，大幅節省時間與 API 費用。
+The Incremental Update Engine enables selective regeneration of documentation pages based on git changes, avoiding costly full regeneration when only a few source files have been modified.
 
-## 概述
+## Overview
 
-增量更新的核心思想是：**只更新需要更新的頁面**。當程式碼發生變更時，系統會：
+When a project evolves, only a subset of documentation pages typically need updating. The Incremental Update Engine bridges git change detection with AI-powered impact analysis to identify exactly which documentation pages require regeneration — and whether entirely new pages should be created for newly added source files.
 
-1. 從 git diff 取得變更的原始碼檔案清單
-2. 比對哪些現有文件頁面引用了這些變更檔案（稱為「匹配」）
-3. 對於尚未有對應文件的新檔案，判斷是否需要新增頁面
-4. 僅重新產生確實需要更新的頁面
+This component is the implementation behind the `selfmd update` CLI command. It depends on an existing documentation set produced by `selfmd generate` and uses the saved `_last_commit` marker to determine the comparison baseline.
 
-系統透過在輸出目錄中持久化一個 `_last_commit` 檔案來追蹤上次更新的 commit，使得每次執行 `selfmd update` 都能精確計算需要重新產生的範圍。
+**Key concepts:**
 
-**關鍵術語：**
+- **Matched files** — Changed source files that are referenced by existing documentation pages. These trigger a Claude-based assessment to determine if the page content is actually affected.
+- **Unmatched files** — Changed source files not referenced by any existing documentation page. These are evaluated by Claude to decide if a new documentation page should be created.
+- **Leaf-to-parent promotion** — When a new page needs to be added as a child of an existing leaf node, the engine automatically promotes the leaf to a parent by moving its content into an `overview` child page.
 
-| 術語 | 說明 |
-|------|------|
-| 匹配頁面（matched） | 內容中含有變更檔案路徑的既有文件頁面 |
-| 未匹配檔案（unmatched） | 沒有任何文件頁面引用的變更檔案 |
-| 葉節點升格（leaf promotion） | 當現有文件目錄的葉節點需要成為父節點時，自動將其原始內容移至 `overview` 子頁面 |
-| 基準 commit（previousCommit） | 與當前 HEAD 進行 diff 比較的起點 commit |
-
-## 架構
+## Architecture
 
 ```mermaid
 flowchart TD
-    CLI["cmd/update.go\nrunUpdate()"]
-    GitPkg["git package\nGetChangedFiles()\nFilterChangedFiles()\nParseChangedFiles()"]
+    CLI["cmd/update.go<br/>runUpdate()"]
+    GitMod["git.GetChangedFiles()"]
+    Filter["git.FilterChangedFiles()"]
     Scanner["scanner.Scan()"]
-    Updater["Generator.Update()"]
-    Match["matchChangedFilesToDocs()\n比對變更檔案 vs 現有頁面"]
-    DetermineMatched["determineMatchedUpdates()\n詢問 Claude：哪些頁面需更新"]
-    DetermineUnmatched["determineUnmatchedPages()\n詢問 Claude：是否需新增頁面"]
-    AddCatalog["addItemToCatalog()\n更新目錄樹"]
-    Generate["generateSinglePage()\n重新產生頁面內容"]
-    GenerateIndex["GenerateIndex()\n更新導航與索引"]
-    Writer["output.Writer\n讀寫頁面、目錄、commit 記錄"]
-    CatalogPkg["catalog.Catalog\n目錄資料結構"]
-    ClaudeRunner["claude.Runner\n呼叫 Claude CLI"]
-    PromptEngine["prompt.Engine\nRenderUpdateMatched()\nRenderUpdateUnmatched()"]
+    Update["Generator.Update()"]
+    Parse["git.ParseChangedFiles()"]
+    Match["matchChangedFilesToDocs()"]
+    Matched["determineMatchedUpdates()"]
+    Unmatched["determineUnmatchedPages()"]
+    Regen["generateSinglePage()"]
+    Index["GenerateIndex()"]
+    SaveCommit["Writer.SaveLastCommit()"]
 
-    CLI --> GitPkg
+    CLI --> GitMod
+    GitMod --> Filter
     CLI --> Scanner
-    CLI --> Updater
-    Updater --> Match
-    Updater --> DetermineMatched
-    Updater --> DetermineUnmatched
-    Updater --> AddCatalog
-    Updater --> Generate
-    Updater --> GenerateIndex
-    Updater --> Writer
-    DetermineMatched --> ClaudeRunner
-    DetermineMatched --> PromptEngine
-    DetermineUnmatched --> ClaudeRunner
-    DetermineUnmatched --> PromptEngine
-    Generate --> ClaudeRunner
-    Match --> Writer
-    Match --> CatalogPkg
-    AddCatalog --> CatalogPkg
-    Writer --> CatalogPkg
+    Filter --> Update
+    Scanner --> Update
+    Update --> Parse
+    Parse --> Match
+    Match -->|"matched files"| Matched
+    Match -->|"unmatched files"| Unmatched
+    Matched -->|"pages to regenerate"| Regen
+    Unmatched -->|"new pages"| Regen
+    Regen --> Index
+    Index --> SaveCommit
 ```
 
-## 資料結構
+### Module Dependencies
 
-### 核心型別
+```mermaid
+flowchart LR
+    updater["generator/updater.go"]
+    pipeline["generator/pipeline.go"]
+    content["generator/content_phase.go"]
+    index["generator/index_phase.go"]
+    git["git/git.go"]
+    catalog["catalog/catalog.go"]
+    claude["claude/runner.go"]
+    prompt["prompt/engine.go"]
+    writer["output/writer.go"]
+    linkfixer["output/linkfixer.go"]
+
+    updater --> git
+    updater --> catalog
+    updater --> claude
+    updater --> prompt
+    updater --> writer
+    updater --> linkfixer
+    updater --> content
+    updater --> index
+    pipeline --> updater
+```
+
+## Core Processes
+
+### Update Workflow
+
+The full update lifecycle is orchestrated by `Generator.Update()` and proceeds through five sequential steps:
+
+```mermaid
+sequenceDiagram
+    participant CLI as cmd/update.go
+    participant Gen as Generator
+    participant Git as git package
+    participant Writer as output.Writer
+    participant Claude as claude.Runner
+    participant Prompt as prompt.Engine
+
+    CLI->>Git: GetChangedFiles(previous, current)
+    CLI->>Git: FilterChangedFiles(includes, excludes)
+    CLI->>Gen: Update(ctx, scan, prev, curr, changedFiles)
+
+    Gen->>Git: ParseChangedFiles(changedFiles)
+    Gen->>Gen: matchChangedFilesToDocs(files, catalog)
+
+    alt Matched files exist
+        Gen->>Prompt: RenderUpdateMatched(data)
+        Gen->>Claude: RunWithRetry(prompt)
+        Claude-->>Gen: JSON list of pages to regenerate
+    end
+
+    alt Unmatched files exist
+        Gen->>Prompt: RenderUpdateUnmatched(data)
+        Gen->>Claude: RunWithRetry(prompt)
+        Claude-->>Gen: JSON list of new pages to create
+        Gen->>Gen: addItemToCatalog() for each new page
+        Gen->>Writer: WriteCatalogJSON(updatedCatalog)
+    end
+
+    loop Each page to regenerate/create
+        Gen->>Gen: generateSinglePage(ctx, scan, item, ...)
+    end
+
+    alt New pages were added
+        Gen->>Gen: GenerateIndex(ctx, catalog)
+    end
+
+    Gen->>Writer: SaveLastCommit(currentCommit)
+```
+
+### Step 1: Parse Changed Files
+
+The raw git diff output is parsed into structured `ChangedFile` records by `git.ParseChangedFiles()`. Each record contains a status code (`M`, `A`, `D`, `R`) and a file path.
 
 ```go
-// UpdateMatchedResult represents a page that Claude determined needs regeneration.
+type ChangedFile struct {
+	Status string // "M", "A", "D", "R"
+	Path   string
+}
+```
+
+> Source: internal/git/git.go#L48-L51
+
+### Step 2: Match Changed Files to Existing Docs
+
+`matchChangedFilesToDocs()` performs a text-search scan: for each changed file, it reads every existing documentation page and checks whether the page content contains the file's path string. This produces two groups:
+
+```go
+func (g *Generator) matchChangedFilesToDocs(files []git.ChangedFile, cat *catalog.Catalog) (matched []matchResult, unmatched []string) {
+	items := cat.Flatten()
+
+	// Pre-read all page contents
+	pageContents := make(map[string]string)
+	for _, item := range items {
+		content, err := g.Writer.ReadPage(item)
+		if err != nil {
+			continue
+		}
+		pageContents[item.Path] = content
+	}
+
+	// For each changed file, find which pages reference it
+	for _, f := range files {
+		var matchedPages []catalog.FlatItem
+		for _, item := range items {
+			content, ok := pageContents[item.Path]
+			if !ok {
+				continue
+			}
+			if strings.Contains(content, f.Path) {
+				matchedPages = append(matchedPages, item)
+			}
+		}
+
+		if len(matchedPages) > 0 {
+			matched = append(matched, matchResult{
+				changedFile: f.Path,
+				pages:       matchedPages,
+			})
+		} else {
+			unmatched = append(unmatched, f.Path)
+		}
+	}
+
+	return matched, unmatched
+}
+```
+
+> Source: internal/generator/updater.go#L177-L214
+
+### Step 3: Claude Evaluates Matched Pages
+
+For matched files, `determineMatchedUpdates()` sends a prompt to Claude containing the list of changed files and summaries of affected pages. Claude reads the actual source code and returns a JSON array of pages that truly need regeneration.
+
+The prompt template instructs Claude to be conservative — only marking pages for regeneration when changes affect behavior, architecture, or APIs described in the documentation:
+
+```go
+data := prompt.UpdateMatchedPromptData{
+	RepositoryName: g.Config.Project.Name,
+	Language:       g.Config.Output.Language,
+	ChangedFiles:   changedFilesList.String(),
+	AffectedPages:  affectedPagesInfo.String(),
+}
+
+rendered, err := g.Engine.RenderUpdateMatched(data)
+```
+
+> Source: internal/generator/updater.go#L257-L264
+
+The response is parsed into `UpdateMatchedResult` structs:
+
+```go
 type UpdateMatchedResult struct {
 	CatalogPath string `json:"catalogPath"`
 	Title       string `json:"title"`
 	Reason      string `json:"reason"`
 }
-
-// UpdateUnmatchedResult represents a new page that Claude determined should be created.
-type UpdateUnmatchedResult struct {
-	CatalogPath string `json:"catalogPath"`
-	Title       string `json:"title"`
-	Reason      string `json:"reason"`
-}
 ```
 
-> 來源：internal/generator/updater.go#L17-L29
+> Source: internal/generator/updater.go#L18-L22
+
+### Step 4: Claude Evaluates Unmatched Files
+
+For unmatched files, `determineUnmatchedPages()` asks Claude whether entirely new documentation pages should be created. Claude receives the list of unmatched files along with the full existing catalog structure:
 
 ```go
-// matchResult holds the mapping between changed files and the doc pages that reference them.
-type matchResult struct {
-	// changedFile is the source file path that changed
-	changedFile string
-	// pages are the doc pages that reference this file
-	pages []catalog.FlatItem
+data := prompt.UpdateUnmatchedPromptData{
+	RepositoryName:  g.Config.Project.Name,
+	Language:        g.Config.Output.Language,
+	UnmatchedFiles:  fileList.String(),
+	ExistingCatalog: existingCatalog,
+	CatalogTable:    cat.BuildLinkTable(),
 }
+
+rendered, err := g.Engine.RenderUpdateUnmatched(data)
 ```
 
-> 來源：internal/generator/updater.go#L168-L174
+> Source: internal/generator/updater.go#L320-L328
+
+New pages are inserted into the catalog tree via `addItemToCatalog()`. If a new page must be placed under an existing leaf node, the leaf is promoted to a parent:
 
 ```go
-// promotedLeaf records when a leaf node was promoted to a parent by adding an "overview" child.
 type promotedLeaf struct {
-	// OriginalPath is the dot-notation path of the original leaf (e.g. "core-modules.mcp-integration")
-	OriginalPath string
-	// OverviewPath is the dot-notation path of the new overview child (e.g. "core-modules.mcp-integration.overview")
-	OverviewPath string
-	// OriginalTitle is the title of the original leaf
+	OriginalPath  string
+	OverviewPath  string
 	OriginalTitle string
 }
+
+func addItemToCatalog(cat *catalog.Catalog, catalogPath, title string) *promotedLeaf {
+	parts := strings.Split(catalogPath, ".")
+	var promoted *promotedLeaf
+	addItemToChildren(&cat.Items, parts, title, "", &promoted)
+	return promoted
+}
 ```
 
-> 來源：internal/generator/updater.go#L359-L367
+> Source: internal/generator/updater.go#L360-L377
 
-### Prompt 資料結構
+### Step 5: Regenerate Pages
 
-增量更新使用兩種 prompt 資料結構，分別對應「匹配頁面判斷」與「未匹配頁面判斷」兩個 Claude 呼叫：
+All pages identified for regeneration (both existing and new) are processed sequentially through `generateSinglePage()`. For existing pages, the current content is passed as `existingContent` context so Claude can produce an informed update:
 
 ```go
-// UpdateMatchedPromptData holds data for deciding which existing pages need regeneration.
-type UpdateMatchedPromptData struct {
-	RepositoryName string
-	Language       string
-	ChangedFiles   string // list of changed source files
-	AffectedPages  string // pages that reference these files (path + title + summary)
-}
-
-// UpdateUnmatchedPromptData holds data for deciding whether new pages are needed.
-type UpdateUnmatchedPromptData struct {
-	RepositoryName  string
-	Language        string
-	UnmatchedFiles  string // changed files not referenced in any existing doc
-	ExistingCatalog string // existing catalog JSON
-	CatalogTable    string // formatted link table of all pages
+allPages := append(pagesToRegenerate, newPages...)
+if len(allPages) == 0 {
+	fmt.Println("[4/4] No documentation pages need updating or creating.")
+} else {
+	fmt.Printf("[4/4] Regenerating %d pages...\n", len(allPages))
+	for i, item := range allPages {
+		fmt.Printf("      [%d/%d] %s（%s）...", i+1, len(allPages), item.Title, item.Path)
+		existing, _ := g.Writer.ReadPage(item)
+		err := g.generateSinglePage(ctx, scan, item, catalogTable, linkFixer, existing)
+		if err != nil {
+			fmt.Printf(" Failed: %v\n", err)
+			g.Logger.Warn("page regeneration failed", "title", item.Title, "path", item.Path, "error", err)
+			g.writePlaceholder(item, err)
+		}
+	}
 }
 ```
 
-> 來源：internal/prompt/engine.go#L80-L95
+> Source: internal/generator/updater.go#L133-L149
 
-## 核心流程
+If new pages were added, navigation files (index and sidebar) are regenerated, and the updated catalog is saved to `_catalog.json`. Finally, the current commit hash is persisted to `_last_commit` for the next incremental update.
 
-### Update() 的四個步驟
+## Commit Baseline Resolution
+
+The `update` command resolves the comparison baseline commit through a three-level fallback chain:
+
+1. **Explicit `--since` flag** — User-provided commit hash takes highest priority
+2. **Saved `_last_commit`** — Read from the output directory, written by the last `generate` or `update` run
+3. **Merge-base fallback** — Computes `git merge-base <base_branch> HEAD` using the configured `git.base_branch`
+
+```go
+previousCommit := sinceCommit
+if previousCommit == "" {
+	saved, readErr := gen.Writer.ReadLastCommit()
+	if readErr == nil && saved != "" {
+		previousCommit = saved
+	} else {
+		base, err := git.GetMergeBase(rootDir, cfg.Git.BaseBranch)
+		if err != nil {
+			return fmt.Errorf("cannot get base commit: %w\nhint: run selfmd generate first or use --since to specify a commit", err)
+		}
+		previousCommit = base
+	}
+}
+```
+
+> Source: cmd/update.go#L68-L82
+
+## Catalog Modification: Leaf-to-Parent Promotion
+
+When Claude determines a new page should be added under an existing leaf node (a page with no children), the engine automatically promotes it. The original content is moved to an `overview` child, and the new page is inserted as a sibling:
 
 ```mermaid
-flowchart TD
-    A["開始：Update()"] --> B["讀取 _catalog.json\n解析現有目錄"]
-    B --> C["ParseChangedFiles()\n解析 git diff 輸出"]
-    C --> D{有變更檔案？}
-    D -->|否| E["列印「無變更」\n結束"]
-    D -->|是| F["[1/4] matchChangedFilesToDocs()\n比對變更檔案與文件頁面"]
-    F --> G["[2/4] determineMatchedUpdates()\n（有匹配時）\nClaude 判斷需更新的頁面"]
-    G --> H["[3/4] determineUnmatchedPages()\n（有未匹配時）\nClaude 判斷是否需新增頁面"]
-    H --> I{有新頁面？}
-    I -->|是| J["addItemToCatalog()\n更新目錄樹"]
-    J --> K["WriteCatalogJSON()\n保存更新後的目錄"]
-    K --> L["[4/4] generateSinglePage()\n逐頁重新產生"]
-    I -->|否| L
-    L --> M{有新增頁面？}
-    M -->|是| N["GenerateIndex()\n重新產生導航與索引"]
-    M -->|否| O["SaveLastCommit()\n保存當前 commit"]
-    N --> O
-    O --> P["列印總費用\n結束"]
+flowchart LR
+    subgraph Before
+        A["core-modules.scanner<br/>(leaf with content)"]
+    end
+    subgraph After
+        B["core-modules.scanner<br/>(parent)"]
+        C["core-modules.scanner.overview<br/>(original content)"]
+        D["core-modules.scanner.new-child<br/>(new page)"]
+        B --> C
+        B --> D
+    end
+    Before --> After
 ```
 
-### 匹配邏輯
-
-`matchChangedFilesToDocs()` 採用**字串搜尋**策略：先一次性讀入所有文件頁面的內容，再逐一檢查每個變更檔案的路徑是否出現在任何頁面的文字中。
+The recursive `addItemToChildren()` function handles arbitrary nesting depth by walking the catalog tree based on dot-notation path segments:
 
 ```go
-// For each changed file, find which pages reference it
-for _, f := range files {
-    var matchedPages []catalog.FlatItem
-    for _, item := range items {
-        content, ok := pageContents[item.Path]
-        if !ok {
-            continue
-        }
-        if strings.Contains(content, f.Path) {
-            matchedPages = append(matchedPages, item)
-        }
-    }
-    // ...
+func addItemToChildren(children *[]catalog.CatalogItem, pathParts []string, title string, parentDotPath string, promoted **promotedLeaf) {
+	if len(pathParts) == 1 {
+		*children = append(*children, catalog.CatalogItem{
+			Title: title,
+			Path:  pathParts[0],
+			Order: len(*children) + 1,
+		})
+		return
+	}
+
+	parentSlug := pathParts[0]
+	currentDotPath := parentSlug
+	if parentDotPath != "" {
+		currentDotPath = parentDotPath + "." + parentSlug
+	}
+
+	for i, item := range *children {
+		if item.Path == parentSlug {
+			if len(item.Children) == 0 {
+				(*children)[i].Children = append((*children)[i].Children, catalog.CatalogItem{
+					Title: item.Title,
+					Path:  "overview",
+					Order: 0,
+				})
+				*promoted = &promotedLeaf{
+					OriginalPath:  currentDotPath,
+					OverviewPath:  currentDotPath + ".overview",
+					OriginalTitle: item.Title,
+				}
+			}
+			addItemToChildren(&(*children)[i].Children, pathParts[1:], title, currentDotPath, promoted)
+			return
+		}
+	}
+
+	newParent := catalog.CatalogItem{
+		Title: parentSlug,
+		Path:  parentSlug,
+		Order: len(*children) + 1,
+	}
+	*children = append(*children, newParent)
+	addItemToChildren(&(*children)[len(*children)-1].Children, pathParts[1:], title, currentDotPath, promoted)
 }
 ```
 
-> 來源：internal/generator/updater.go#L191-L213
+> Source: internal/generator/updater.go#L381-L430
 
-### 葉節點升格（Leaf Promotion）
+## Usage Examples
 
-當 Claude 決定在現有葉節點下新增子頁面時（例如在 `core-modules.scanner` 下新增 `core-modules.scanner.advanced`），系統會自動將原葉節點升格為父節點，並將其原始內容搬移至 `overview` 子頁面：
+### Running an Incremental Update
 
-```go
-if len(item.Children) == 0 {
-    // This is a leaf node that needs to become a parent.
-    // Add an "overview" child to preserve the original content.
-    (*children)[i].Children = append((*children)[i].Children, catalog.CatalogItem{
-        Title: item.Title,
-        Path:  "overview",
-        Order: 0,
-    })
-    *promoted = &promotedLeaf{
-        OriginalPath:  currentDotPath,
-        OverviewPath:  currentDotPath + ".overview",
-        OriginalTitle: item.Title,
-    }
-}
-```
-
-> 來源：internal/generator/updater.go#L402-L414
-
-## Commit 追蹤機制
-
-增量更新依賴一個「基準 commit」（previousCommit）來計算 git diff 範圍。系統的優先順序如下：
-
-```mermaid
-flowchart TD
-    A["runUpdate() 啟動"] --> B{使用者有\n指定 --since？}
-    B -->|是| C["使用 --since 指定的 commit\n作為基準"]
-    B -->|否| D["ReadLastCommit()\n讀取 _last_commit 檔案"]
-    D --> E{讀取成功？}
-    E -->|是| F["使用上次 generate/update\n儲存的 commit"]
-    E -->|否| G["GetMergeBase()\n計算與 baseBranch 的分叉點"]
-    G --> H{成功？}
-    H -->|是| I["使用 merge-base commit"]
-    H -->|否| J["回傳錯誤：\n提示先執行 selfmd generate"]
-```
-
-> 來源：cmd/update.go#L67-L81
-
-每次成功的 `update` 執行後，系統會將當前 HEAD commit 儲存至 `_last_commit` 檔案，供下次增量更新使用：
-
-```go
-// Save current commit for next incremental update
-if err := g.Writer.SaveLastCommit(currentCommit); err != nil {
-    g.Logger.Warn("保存 commit 記錄失敗", "error", err)
-}
-```
-
-> 來源：internal/generator/updater.go#L159-L162
-
-`_last_commit` 同樣在 `generate` 完成後也會寫入，確保初次執行後即可立即使用 `update`：
-
-```go
-// Save current commit for incremental updates
-if git.IsGitRepo(g.RootDir) {
-    if commit, err := git.GetCurrentCommit(g.RootDir); err == nil {
-        if err := g.Writer.SaveLastCommit(commit); err != nil {
-            g.Logger.Warn("保存 commit 記錄失敗", "error", err)
-        }
-    }
-}
-```
-
-> 來源：internal/generator/pipeline.go#L157-L164
-
-## 使用範例
-
-### 基本增量更新
-
-```bash
-# 自動偵測上次 generate/update 後的所有變更
-selfmd update
-```
-
-### 指定基準 Commit
-
-```bash
-# 與指定的 commit 比較
-selfmd update --since abc1234
-
-# 與某個 tag 或分支比較
-selfmd update --since v1.0.0
-selfmd update --since main
-```
-
-> 來源：cmd/update.go#L19-L31
-
-### CLI 命令定義
+The `update` command is invoked via the CLI. It compares the current HEAD against the last known commit:
 
 ```go
 var updateCmd = &cobra.Command{
-    Use:   "update",
-    Short: "基於 git 變更增量更新文件",
-    Long: `分析 git 變更並增量更新受影響的文件頁面。
-需要先執行過 selfmd generate 產生初始文件。`,
-    RunE: runUpdate,
+	Use:   "update",
+	Short: "Incremental update based on git changes",
+	Long: `Analyze git changes and incrementally update affected documentation pages.
+Requires initial documentation generated by selfmd generate.`,
+	RunE: runUpdate,
 }
 
 func init() {
-    updateCmd.Flags().StringVar(&sinceCommit, "since", "", "與指定 commit 比較（預設為上次 generate/update 的 commit）")
-    rootCmd.AddCommand(updateCmd)
+	updateCmd.Flags().StringVar(&sinceCommit, "since", "", "compare with specified commit (default: last generate/update commit)")
+	rootCmd.AddCommand(updateCmd)
 }
 ```
 
-> 來源：cmd/update.go#L21-L32
+> Source: cmd/update.go#L21-L32
 
-### 執行輸出範例
+### File Filtering with Include/Exclude Patterns
 
-系統在執行時會顯示四個步驟的進度：
-
-```
-比較範圍：abc12345..def67890
-變更檔案：
-M   internal/scanner/scanner.go
-A   internal/scanner/filetree.go
-
-[1/4] 搜尋受影響的文件頁面...
-      2 個變更檔案已匹配到現有文件，0 個未匹配
-[2/4] 呼叫 Claude 判斷需要更新的頁面...
-      → 專案掃描器：scanner.go 的核心邏輯已變更
-      完成（1 個頁面需要更新）
-[3/4] 所有變更檔案均已有對應文件，跳過
-[4/4] 重新產生 1 個頁面...
-      [1/1] 專案掃描器（core-modules.scanner）... 完成（12.3s，$0.0024）
-
-更新完成！總費用：$0.0024 USD
-```
-
-## 前置條件
-
-執行 `selfmd update` 需要滿足以下條件：
-
-1. **必須為 git 倉庫**：系統會在啟動時檢查 `git.IsGitRepo(rootDir)`，若非 git 倉庫則立即回傳錯誤
-2. **必須已執行過 `selfmd generate`**：系統需要讀取 `_catalog.json` 以了解現有文件結構；若目錄不存在，會提示先執行 `generate`
-3. **Claude CLI 必須可用**：與 `generate` 相同，需要 Claude CLI 正常運作
+Before entering the update pipeline, changed files are filtered through the configured `targets.include` and `targets.exclude` glob patterns:
 
 ```go
-if !git.IsGitRepo(rootDir) {
-    return fmt.Errorf("當前目錄不是 git 倉庫，無法執行增量更新")
+changedFiles = git.FilterChangedFiles(changedFiles, cfg.Targets.Include, cfg.Targets.Exclude)
+```
+
+> Source: cmd/update.go#L94
+
+The filter uses doublestar glob matching to support patterns like `src/**`, `**/*.pb.go`, and `vendor/**`:
+
+```go
+func FilterChangedFiles(changedFiles string, includes, excludes []string) string {
+	lines := strings.Split(changedFiles, "\n")
+	var filtered []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 2 {
+			continue
+		}
+
+		filePath := parts[len(parts)-1]
+
+		excluded := false
+		for _, pattern := range excludes {
+			if matched, _ := doublestar.Match(pattern, filePath); matched {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
+			continue
+		}
+
+		if len(includes) > 0 {
+			included := false
+			for _, pattern := range includes {
+				if matched, _ := doublestar.Match(pattern, filePath); matched {
+					included = true
+					break
+				}
+			}
+			if !included {
+				continue
+			}
+		}
+
+		filtered = append(filtered, line)
+	}
+
+	return strings.Join(filtered, "\n")
 }
 ```
 
-> 來源：cmd/update.go#L49-L51
+> Source: internal/git/git.go#L73-L122
 
-## 相關連結
+## Related Links
 
-- [Git Diff 變更偵測](../../git-integration/change-detection/index.md)
-- [受影響頁面判斷邏輯](../../git-integration/affected-pages/index.md)
-- [文件目錄管理](../catalog/index.md)
-- [文件產生管線](../generator/index.md)
-- [內容頁面產生階段](../generator/content-phase/index.md)
-- [Prompt 模板引擎](../prompt-engine/index.md)
-- [selfmd update 指令](../../cli/cmd-update/index.md)
+- [update Command](../../cli/cmd-update/index.md)
+- [Documentation Generator](../generator/index.md)
+- [Content Phase](../generator/content-phase/index.md)
+- [Catalog Manager](../catalog/index.md)
+- [Claude Runner](../claude-runner/index.md)
+- [Prompt Engine](../prompt-engine/index.md)
+- [Change Detection](../../git-integration/change-detection/index.md)
+- [Affected Page Matching](../../git-integration/affected-pages/index.md)
+- [Generation Pipeline](../../architecture/pipeline/index.md)
+- [Output Writer](../output-writer/index.md)
 
-## 參考檔案
+## Reference Files
 
-| 檔案路徑 | 說明 |
-|----------|------|
-| `internal/generator/updater.go` | 增量更新核心邏輯：`Update()`、`matchChangedFilesToDocs()`、`determineMatchedUpdates()`、`determineUnmatchedPages()`、`addItemToCatalog()` |
-| `internal/generator/pipeline.go` | `Generator` 結構定義、`Generate()` 完整管線（包含 commit 保存） |
-| `internal/generator/content_phase.go` | `generateSinglePage()` 實作，被 updater 重用以重新產生頁面 |
-| `internal/git/git.go` | Git 操作封裝：`GetChangedFiles()`、`FilterChangedFiles()`、`ParseChangedFiles()`、`GetCurrentCommit()` |
-| `internal/catalog/catalog.go` | `Catalog`、`CatalogItem`、`FlatItem` 資料結構與 `Flatten()` 方法 |
-| `internal/output/writer.go` | `ReadPage()`、`WritePage()`、`SaveLastCommit()`、`ReadLastCommit()`、`WriteCatalogJSON()` |
-| `internal/prompt/engine.go` | `UpdateMatchedPromptData`、`UpdateUnmatchedPromptData` 資料結構與 `RenderUpdateMatched()`、`RenderUpdateUnmatched()` |
-| `cmd/update.go` | `selfmd update` 指令定義與 `runUpdate()` 執行邏輯 |
+| File Path | Description |
+|-----------|-------------|
+| `internal/generator/updater.go` | Core incremental update logic: matching, Claude evaluation, catalog modification |
+| `cmd/update.go` | CLI entry point for the `update` command |
+| `internal/git/git.go` | Git operations: changed files, merge-base, filtering |
+| `internal/generator/pipeline.go` | Generator struct definition and full generation pipeline |
+| `internal/generator/content_phase.go` | Single page generation logic reused by the update engine |
+| `internal/generator/index_phase.go` | Index and navigation regeneration |
+| `internal/catalog/catalog.go` | Catalog data model, flatten, and link table building |
+| `internal/output/writer.go` | File I/O: reading/writing pages, catalog JSON, commit markers |
+| `internal/output/linkfixer.go` | Post-processing link fixer for generated markdown |
+| `internal/prompt/engine.go` | Prompt template engine and data structures |
+| `internal/config/config.go` | Configuration model including git and target settings |
+| `internal/prompt/templates/en-US/update_matched.tmpl` | Prompt template for evaluating matched pages |
+| `internal/prompt/templates/en-US/update_unmatched.tmpl` | Prompt template for evaluating unmatched files |
