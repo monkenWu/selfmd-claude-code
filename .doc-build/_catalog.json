@@ -1,0 +1,259 @@
+{
+  "items": [
+    {
+      "title": "概述",
+      "path": "overview",
+      "order": 0,
+      "children": [
+        {
+          "title": "專案介紹與功能特色",
+          "path": "introduction",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "技術棧與相依套件",
+          "path": "tech-stack",
+          "order": 1,
+          "children": []
+        },
+        {
+          "title": "輸出結構說明",
+          "path": "output-structure",
+          "order": 2,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "快速開始",
+      "path": "getting-started",
+      "order": 1,
+      "children": [
+        {
+          "title": "安裝與建置",
+          "path": "installation",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "初始化設定",
+          "path": "init",
+          "order": 1,
+          "children": []
+        },
+        {
+          "title": "產生第一份文件",
+          "path": "first-run",
+          "order": 2,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "CLI 指令參考",
+      "path": "cli",
+      "order": 2,
+      "children": [
+        {
+          "title": "selfmd init",
+          "path": "cmd-init",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "selfmd generate",
+          "path": "cmd-generate",
+          "order": 1,
+          "children": []
+        },
+        {
+          "title": "selfmd update",
+          "path": "cmd-update",
+          "order": 2,
+          "children": []
+        },
+        {
+          "title": "selfmd translate",
+          "path": "cmd-translate",
+          "order": 3,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "設定說明",
+      "path": "configuration",
+      "order": 3,
+      "children": [
+        {
+          "title": "selfmd.yaml 結構總覽",
+          "path": "config-overview",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "專案與掃描目標設定",
+          "path": "project-targets",
+          "order": 1,
+          "children": []
+        },
+        {
+          "title": "輸出與多語言設定",
+          "path": "output-language",
+          "order": 2,
+          "children": []
+        },
+        {
+          "title": "Claude CLI 整合設定",
+          "path": "claude-config",
+          "order": 3,
+          "children": []
+        },
+        {
+          "title": "Git 整合設定",
+          "path": "git-config",
+          "order": 4,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "系統架構",
+      "path": "architecture",
+      "order": 4,
+      "children": [
+        {
+          "title": "整體流程與四階段管線",
+          "path": "pipeline",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "模組依賴關係",
+          "path": "module-dependencies",
+          "order": 1,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "核心模組",
+      "path": "core-modules",
+      "order": 5,
+      "children": [
+        {
+          "title": "專案掃描器",
+          "path": "scanner",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "文件目錄管理",
+          "path": "catalog",
+          "order": 1,
+          "children": []
+        },
+        {
+          "title": "Prompt 模板引擎",
+          "path": "prompt-engine",
+          "order": 2,
+          "children": []
+        },
+        {
+          "title": "Claude CLI 執行器",
+          "path": "claude-runner",
+          "order": 3,
+          "children": []
+        },
+        {
+          "title": "文件產生管線",
+          "path": "generator",
+          "order": 4,
+          "children": [
+            {
+              "title": "目錄產生階段",
+              "path": "catalog-phase",
+              "order": 0,
+              "children": []
+            },
+            {
+              "title": "內容頁面產生階段",
+              "path": "content-phase",
+              "order": 1,
+              "children": []
+            },
+            {
+              "title": "索引與導航產生階段",
+              "path": "index-phase",
+              "order": 2,
+              "children": []
+            },
+            {
+              "title": "翻譯階段",
+              "path": "translate-phase",
+              "order": 3,
+              "children": []
+            }
+          ]
+        },
+        {
+          "title": "增量更新",
+          "path": "incremental-update",
+          "order": 5,
+          "children": []
+        },
+        {
+          "title": "輸出寫入與連結修復",
+          "path": "output-writer",
+          "order": 6,
+          "children": []
+        },
+        {
+          "title": "靜態文件瀏覽器",
+          "path": "static-viewer",
+          "order": 7,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "多語言支援",
+      "path": "i18n",
+      "order": 6,
+      "children": [
+        {
+          "title": "支援的語言與模板",
+          "path": "supported-languages",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "翻譯工作流程",
+          "path": "translation-workflow",
+          "order": 1,
+          "children": []
+        }
+      ]
+    },
+    {
+      "title": "Git 整合與增量更新",
+      "path": "git-integration",
+      "order": 7,
+      "children": [
+        {
+          "title": "Git Diff 變更偵測",
+          "path": "change-detection",
+          "order": 0,
+          "children": []
+        },
+        {
+          "title": "受影響頁面判斷邏輯",
+          "path": "affected-pages",
+          "order": 1,
+          "children": []
+        }
+      ]
+    }
+  ]
+}

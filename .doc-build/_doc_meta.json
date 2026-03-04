@@ -1,0 +1,15 @@
+{
+  "default_language": "en-US",
+  "available_languages": [
+    {
+      "code": "en-US",
+      "native_name": "English",
+      "is_default": true
+    },
+    {
+      "code": "zh-TW",
+      "native_name": "繁體中文",
+      "is_default": false
+    }
+  ]
+}

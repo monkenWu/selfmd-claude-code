@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Determine release type
+        id: release_type
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          # Check which branches contain this tag
+          if git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/production'; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build binaries
+        run: |
+          mkdir -p ./bin
+
+          PLATFORMS=(
+            "linux/arm64"
+            "linux/amd64"
+            "darwin/arm64"
+            "darwin/amd64"
+            "windows/amd64"
+            "windows/arm64"
+          )
+
+          for platform in "${PLATFORMS[@]}"; do
+            GOOS="${platform%/*}"
+            GOARCH="${platform#*/}"
+            os_name="$GOOS"
+            if [ "$GOOS" = "darwin" ]; then
+              os_name="macos"
+            fi
+            output="./bin/selfmd-${os_name}-${GOARCH}"
+            if [ "$GOOS" = "windows" ]; then
+              output="${output}.exe"
+            fi
+            echo "Building ${output}..."
+            GOOS="$GOOS" GOARCH="$GOARCH" go build -o "$output" .
+          done
+
+          echo ""
+          echo "All builds complete:"
+          ls -lh ./bin/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./bin/*
+          prerelease: ${{ steps.release_type.outputs.prerelease == 'true' }}
+          generate_release_notes: true
