@@ -1,6 +1,6 @@
 project:
     name: selfmd
-    type: backend
+    type: cli
     description: ""
 targets:
     include:
@@ -23,7 +23,7 @@ targets:
         - main.go
         - cmd/root.go
 output:
-    dir: .doc-build
+    dir: docs
     language: en-US
     secondary_languages: ["zh-TW"]
     clean_before_generate: false
