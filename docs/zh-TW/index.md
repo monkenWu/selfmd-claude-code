@@ -4,7 +4,7 @@
 
 ## 目錄
 
-- [總覽](./overview/index.md)
+- [概覽](./overview/index.md)
   - [簡介](./overview/introduction/index.md)
   - [輸出結構](./overview/output-structure/index.md)
   - [技術堆疊](./overview/tech-stack/index.md)
@@ -12,7 +12,7 @@
   - [安裝](./getting-started/installation/index.md)
   - [初始化](./getting-started/init/index.md)
   - [首次執行](./getting-started/first-run/index.md)
-- [CLI 命令](./cli/index.md)
+- [CLI 指令](./cli/index.md)
   - [generate 指令](./cli/cmd-generate/index.md)
   - [init 指令](./cli/cmd-init/index.md)
   - [update 指令](./cli/cmd-update/index.md)

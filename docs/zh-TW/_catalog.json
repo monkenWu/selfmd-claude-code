@@ -1,7 +1,7 @@
 {
   "items": [
     {
-      "title": "總覽",
+      "title": "概覽",
       "path": "overview",
       "order": 0,
       "children": [
@@ -51,7 +51,7 @@
       ]
     },
     {
-      "title": "CLI 命令",
+      "title": "CLI 指令",
       "path": "cli",
       "order": 2,
       "children": [
