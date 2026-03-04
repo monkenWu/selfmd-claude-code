@@ -33,7 +33,7 @@ Writing and maintaining technical documentation is painful. It falls out of date
 
 ### 2. Download
 
-Download the latest binary for your platform from the [Releases](https://github.com/anthropics/auto-doc-cloud-code/releases) page.
+Download the latest binary for your platform from the [Releases](https://github.com/monkenWu/selfmd-claude-code/releases) page.
 
 | Platform | Architecture | File |
 |----------|-------------|------|

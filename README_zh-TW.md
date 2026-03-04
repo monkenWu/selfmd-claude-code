@@ -33,7 +33,7 @@
 
 ### 2. 下載
 
-從 [Releases](https://github.com/anthropics/auto-doc-cloud-code/releases) 頁面下載適合你平台的執行檔。
+從 [Releases](https://github.com/monkenWu/selfmd-claude-code/releases) 頁面下載適合你平台的執行檔。
 
 | 平台 | 架構 | 檔案 |
 |------|------|------|
